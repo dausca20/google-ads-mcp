@@ -60,10 +60,35 @@ ensure_random_secret() {
 
 # ---------------------------------------------------------------------------
 bold "Step 1 of 6: Finding your Google Cloud project"
-PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
-PROJECT_ID="$(ask "Google Cloud project ID" "$PROJECT_ID")"
+DEFAULT_PROJECT="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
+if [[ -z $DEFAULT_PROJECT ]]; then
+  PROJECTS="$(gcloud projects list --format='value(projectId)' 2>/dev/null || true)"
+  if [[ -n $PROJECTS && $PROJECTS != *$'\n'* ]]; then
+    DEFAULT_PROJECT="$PROJECTS" # only one project, so offer it
+  elif [[ -n $PROJECTS ]]; then
+    echo "Your project IDs:"
+    printf '%s\n' "$PROJECTS" | sed 's/^/  /'
+  fi
+fi
+echo "This is the project ID (like google-ads-mcp or google-ads-mcp-123456), not the Client ID."
+for attempt in 1 2 3 4 5; do
+  PROJECT_ID="$(ask "Google Cloud project ID" "$DEFAULT_PROJECT")"
+  PROJECT_ID="${PROJECT_ID//[[:space:]]/}"
+  if [[ $PROJECT_ID == *.apps.googleusercontent.com ]]; then
+    echo "That's your Client ID. Keep it handy for step 3. Here I need the project ID."
+  elif [[ -n $PROJECT_ID ]] &&
+    PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)' 2>/dev/null)" &&
+    [[ -n $PROJECT_NUMBER ]]; then
+    break
+  else
+    echo "Couldn't find a project with the ID \"$PROJECT_ID\". Check the spelling and try again."
+  fi
+  if ((attempt == 5)); then
+    echo "Run gcloud projects list to see your project IDs, then run bash setup.sh again." >&2
+    false
+  fi
+done
 gcloud config set project "$PROJECT_ID" >/dev/null 2>&1
-PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 BASE_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 REDIRECT_URI="${BASE_URL}/auth/callback"
 echo "Using project $PROJECT_ID"
