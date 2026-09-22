@@ -2,13 +2,13 @@
 
 This lets Claude look at your Google Ads accounts by itself, so your skills can pull the data for you.
 
-It is **read-only**. Claude can look at your accounts, but it can't change them.
+Claude can read everything. It can also make four kinds of changes, but only after showing you a preview first (see [Making changes](#making-changes)). It can't touch budgets.
 
 ```
 Claude  ──►  your server (on Google Cloud)  ──►  Google Ads
 ```
 
-The server is [Google's official Google Ads MCP server](https://github.com/googleads/google-ads-mcp). This repo adds two things: a lock so **only your email** can use it, and a script that sets everything up for you.
+The reading part is [Google's official Google Ads MCP server](https://github.com/googleads/google-ads-mcp). This repo adds three things: a lock so **only your email** can use it, the change tools, and a script that sets everything up for you.
 
 ## What you need
 
@@ -66,11 +66,33 @@ On a Team or Enterprise plan, an Owner adds it under **Organization settings →
 
 Ask Claude: **"What Google Ads accounts can I access?"**
 
+## Making changes
+
+Claude can do these four things:
+
+| Change | What to know |
+| --- | --- |
+| Add negative keywords | To a campaign, an ad group, or a shared negative keyword list. Ones that are already there get skipped. |
+| Create a new responsive search ad | It always starts **paused**, so nothing goes live until you turn it on. Your old ads aren't touched. |
+| Pause or turn on | Campaigns, ad groups, ads, or keywords. |
+| Change bid adjustments | Location, device, and ad schedule, on targets the campaign already has. It never adds or removes targeting. |
+
+Every change happens in two steps:
+
+1. **Preview.** Claude looks up what's there now and asks Google to test the change without making it ([Google docs](https://developers.google.com/google-ads/api/docs/concepts/api-structure)). You see a before-and-after list plus any warnings.
+2. **Apply.** Only after you say yes does Claude make the change. It can only apply the exact change you previewed. A preview expires after an hour and can be used once.
+
+Claude asks your permission before it uses a connector tool, unless you pick "Allow always" for that tool ([Claude help](https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities)). The tool that makes changes is called `apply_change`. The preview tools never change anything.
+
+Every change shows up in your Google Ads change history as made through the API ([Google Ads help](https://support.google.com/google-ads/answer/19888?hl=en)).
+
+If a campaign uses Smart Bidding (like Maximize conversions or Target CPA), the preview warns you: Google ignores bid adjustments there, except a -100% device adjustment ([Google Ads help](https://support.google.com/google-ads/answer/2732132?hl=en)).
+
 ## Good to know
 
 - **Auction insights can't be pulled this way.** Google doesn't make them public through the API ([Google Ads API forum](https://groups.google.com/g/adwords-api/c/30s21wGZkOU)), so the auction insights part of your competitor report still needs an export you download yourself.
 - **Daily limit:** Explorer access allows 2,880 operations a day ([Google docs](https://developers.google.com/google-ads/api/docs/api-policy/access-levels)).
-- **Change settings** (like who can use it, or your manager account): in Cloud Shell run `cd google-ads-mcp && git pull && bash setup.sh`. Press Enter to keep anything you don't want to change.
+- **Update the server or change settings** (like who can use it, or your manager account): in Cloud Shell run `cd google-ads-mcp && git pull && bash setup.sh`. Press Enter to keep anything you don't want to change.
 - **Manager account (MCC):** if you enter one in the script, Claude reaches all your accounts through it.
 
 ## Files
@@ -79,6 +101,7 @@ Ask Claude: **"What Google Ads accounts can I access?"**
 | --- | --- |
 | `setup.sh` | Sets up Google Cloud and starts the server |
 | `server.py` | Starts Google's server and adds the email lock |
+| `changes.py` | The preview and apply tools for making changes |
 | `Dockerfile` | Packs the server so Google Cloud can run it |
 | `constraints.txt` | Locks the exact versions that were tested |
-| `tests/` | Checks that the email lock works |
+| `tests/` | Checks the email lock and the change tools |

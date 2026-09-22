@@ -1,9 +1,11 @@
-"""Runs Google's official Google Ads MCP server with an email allowlist.
+"""Runs Google's official Google Ads MCP server with two additions.
 
-Google's server (https://github.com/googleads/google-ads-mcp) does the real
-work. This file only adds one thing on top: when the server runs on the web
-with Google sign-in turned on, only the Google accounts listed in
-ALLOWED_EMAILS can use it. Anyone else who finds the URL is turned away.
+Google's server (https://github.com/googleads/google-ads-mcp) does the
+reading. This file adds:
+
+1. An email allowlist. When the server runs on the web with Google sign-in
+   turned on, only the Google accounts listed in ALLOWED_EMAILS can use it.
+2. The change tools in changes.py (preview first, then apply).
 """
 
 import os
@@ -14,6 +16,9 @@ from fastmcp.utilities.authorization import AuthContext
 
 from ads_mcp.coordinator import mcp
 from ads_mcp.server import run_server
+from changes import changes_mcp
+
+mcp.mount(changes_mcp, namespace="changes")
 
 
 def parse_allowed_emails(raw: str | None) -> frozenset[str]:

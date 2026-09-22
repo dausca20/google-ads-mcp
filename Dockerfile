@@ -11,7 +11,7 @@ COPY constraints.txt .
 RUN pip install --no-cache-dir --constraint constraints.txt \
     "google-ads-mcp[firestore] @ ${GOOGLE_ADS_MCP_SOURCE}"
 
-COPY server.py .
+COPY server.py changes.py ./
 
 # Cloud Run sends traffic to port 8080.
 EXPOSE 8080
