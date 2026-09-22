@@ -29,9 +29,11 @@ The reading part is [Google's official Google Ads MCP server](https://github.com
 2. App name: `Claude Google Ads`. Support email: yours.
 3. Audience: **External**. Contact email: yours. Agree and click **Create**.
 4. Open **Audience**, then under **Test users** click **Add users** and add the email you use for Google Ads.
-5. Pick one:
-   - **Leave it in Testing.** Google makes you reconnect in Claude every 7 days.
-   - **Click Publish app.** No weekly reconnect. The first time you sign in, Google shows a "Google hasn't verified this app" page. Click **Advanced**, then continue.
+5. Leave the app in **Testing** for now. On the Branding page, leave the home page, privacy policy, terms of service, and authorized domains empty.
+
+   Later you can pick one:
+   - **Stay in Testing.** Google makes you reconnect in Claude every 7 days.
+   - **Publish the app.** No weekly reconnect. Google needs a home page and privacy policy link first, and your server provides both. When step 4 finishes, the script prints both links and a domain. Paste the links on the [Branding page](https://console.cloud.google.com/auth/branding), add the domain under **Authorized domains**, click **Save**, then click **Publish app** on the Audience page. The first time you sign in after that, Google shows a "Google hasn't verified this app" page. Click **Advanced**, then continue.
 
    Either way, the server only lets in the emails you give it in step 4.
 
@@ -103,6 +105,7 @@ If a campaign uses Smart Bidding (like Maximize conversions or Target CPA), the 
 | `setup.sh` | Sets up Google Cloud and starts the server |
 | `server.py` | Starts Google's server and adds the email lock |
 | `changes.py` | The preview and apply tools for making changes |
+| `pages.py` | The home page and privacy policy Google needs to publish the app |
 | `Dockerfile` | Packs the server so Google Cloud can run it |
 | `constraints.txt` | Locks the exact versions that were tested |
 | `tests/` | Checks the email lock and the change tools |

@@ -235,4 +235,11 @@ Paste this URL into Claude as a custom connector:
 
 Reminder: your Google OAuth client must list this redirect URI:
     ${REDIRECT_URI}
+
+Only if you want to publish the Google sign-in app (no weekly reconnect):
+open https://console.cloud.google.com/auth/branding?project=${PROJECT_ID}
+  - Application home page:        ${BASE_URL}/
+  - Application privacy policy:   ${BASE_URL}/privacy
+  - Authorized domains, Add domain: ${BASE_URL#https://}
+Click Save, then go to Audience and click Publish app.
 EOF

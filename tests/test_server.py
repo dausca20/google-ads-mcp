@@ -103,3 +103,15 @@ def test_other_user_cannot_run_search(allowlisted_server):
     ):
         with pytest.raises(Exception, match="Authorization failed"):
             asyncio.run(run())
+
+
+def test_home_and_privacy_pages_are_public():
+    from starlette.testclient import TestClient
+
+    client = TestClient(mcp.http_app())
+    home = client.get("/")
+    assert home.status_code == 200
+    assert 'href="/privacy"' in home.text
+    privacy = client.get("/privacy")
+    assert privacy.status_code == 200
+    assert "Limited Use" in privacy.text

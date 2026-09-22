@@ -6,6 +6,8 @@ reading. This file adds:
 1. An email allowlist. When the server runs on the web with Google sign-in
    turned on, only the Google accounts listed in ALLOWED_EMAILS can use it.
 2. The change tools in changes.py (preview first, then apply).
+3. A home page and privacy policy (pages.py), which Google needs before the
+   sign-in app can be published.
 """
 
 import os
@@ -17,8 +19,10 @@ from fastmcp.utilities.authorization import AuthContext
 from ads_mcp.coordinator import mcp
 from ads_mcp.server import run_server
 from changes import changes_mcp
+from pages import add_pages
 
 mcp.mount(changes_mcp, namespace="changes")
+add_pages(mcp)
 
 
 def parse_allowed_emails(raw: str | None) -> frozenset[str]:
