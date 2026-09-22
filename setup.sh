@@ -93,6 +93,21 @@ BASE_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 REDIRECT_URI="${BASE_URL}/auth/callback"
 echo "Using project $PROJECT_ID"
 
+# Google Cloud won't turn on the services below without billing.
+BILLING="$(gcloud billing projects describe "$PROJECT_ID" --format='value(billingEnabled)' 2>/dev/null || true)"
+if [[ ${BILLING,,} == false ]]; then
+  cat >&2 <<EOF
+
+Billing isn't turned on for project ${PROJECT_ID} yet. Google Cloud needs it before it can run the server.
+  1. Open https://console.cloud.google.com/billing/projects
+  2. Find ${PROJECT_ID}, click the three dots, and pick "Change billing".
+  3. Choose your billing account and click "Set account".
+No billing account yet? Make one first at https://console.cloud.google.com/billing/create
+Then run: bash setup.sh
+EOF
+  false
+fi
+
 # ---------------------------------------------------------------------------
 bold "Step 2 of 6: Turning on the Google Cloud services it needs (about a minute)"
 gcloud services enable \
