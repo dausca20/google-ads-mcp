@@ -20,6 +20,7 @@ SECRET_STORAGE=google-ads-mcp-storage-encryption-key
 
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 trap 'printf "\n\033[31mSetup stopped because of the error above. Copy that error text and paste it to Claude for help.\033[0m\n"' ERR
+trap 'printf "\n\nSetup was stopped before it finished. Your answers so far are saved. Run bash setup.sh to pick up where you left off.\n"; exit 130' INT
 
 # Asks a question. Pressing Enter keeps the value shown in [brackets].
 ask() {
@@ -93,6 +94,19 @@ BASE_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 REDIRECT_URI="${BASE_URL}/auth/callback"
 echo "Using project $PROJECT_ID"
 
+# Answers from earlier runs (never the secret), so pressing Enter keeps them.
+SETTINGS_FILE="$HOME/.google-ads-mcp-setup-${PROJECT_ID}"
+if [[ -f $SETTINGS_FILE ]]; then
+  # shellcheck source=/dev/null
+  source "$SETTINGS_FILE"
+fi
+save_setting() {
+  local tmp
+  tmp="$(mktemp)"
+  { grep -v "^$1=" "$SETTINGS_FILE" 2>/dev/null || true; printf '%s=%q\n' "$1" "$2"; } >"$tmp"
+  mv "$tmp" "$SETTINGS_FILE"
+}
+
 # Google Cloud won't turn on the services below without billing.
 BILLING="$(gcloud billing projects describe "$PROJECT_ID" --format='value(billingEnabled)' 2>/dev/null || true)"
 if [[ ${BILLING,,} == false ]]; then
@@ -147,31 +161,59 @@ Click "Create client", then:
       ${REDIRECT_URI}
 
   - Click "Create". Copy the Client ID and Client secret it shows you.
+
+To paste here, press Ctrl+V (Cmd+V on a Mac). Ctrl+C in this window stops the setup.
 EOF
 echo
-CLIENT_ID="$(ask "Paste the Client ID" "$(existing_env GOOGLE_ADS_MCP_OAUTH_CLIENT_ID)")"
-CLIENT_ID="${CLIENT_ID//[[:space:]]/}"
-if [[ $CLIENT_ID != *.apps.googleusercontent.com ]]; then
-  echo "That does not look like a Client ID. It should end in .apps.googleusercontent.com" >&2
-  false
-fi
+DEFAULT_CLIENT_ID="${SAVED_CLIENT_ID:-$(existing_env GOOGLE_ADS_MCP_OAUTH_CLIENT_ID)}"
+for attempt in 1 2 3 4 5; do
+  CLIENT_ID="$(ask "Paste the Client ID" "$DEFAULT_CLIENT_ID")"
+  CLIENT_ID="${CLIENT_ID//[[:space:]]/}"
+  if [[ $CLIENT_ID =~ ^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$ ]]; then
+    break
+  fi
+  echo "That isn't a full Client ID. Open your client and click the copy button next to Client ID."
+  echo "A full one looks like 1234567890-abc123def456.apps.googleusercontent.com, with no ... in the middle."
+  if ((attempt == 5)); then false; fi
+done
+save_setting SAVED_CLIENT_ID "$CLIENT_ID"
+
 if secret_exists "$SECRET_CLIENT"; then
-  read -r -s -p "Paste the Client secret (or press Enter to keep the one saved before): " CLIENT_SECRET
+  SECRET_PROMPT="Paste the Client secret, or press Enter to keep the one you saved before: "
 else
-  read -r -s -p "Paste the Client secret (it stays hidden while you paste): " CLIENT_SECRET
+  SECRET_PROMPT="Paste the Client secret and press Enter (nothing shows while you paste, that's normal): "
 fi
-echo
-CLIENT_SECRET="${CLIENT_SECRET//[[:space:]]/}"
-if [[ -z $CLIENT_SECRET ]] && ! secret_exists "$SECRET_CLIENT"; then
-  echo "The Client secret is required." >&2
-  false
-fi
+for attempt in 1 2 3 4 5; do
+  read -r -s -p "$SECRET_PROMPT" CLIENT_SECRET
+  echo
+  CLIENT_SECRET="${CLIENT_SECRET//[[:space:]]/}"
+  if [[ $CLIENT_SECRET == *.apps.googleusercontent.com ]]; then
+    echo "That's the Client ID. The secret is the other value, and it often starts with GOCSPX-."
+  elif [[ -n $CLIENT_SECRET ]]; then
+    # Saved right away in Secret Manager, so a second run won't need it again.
+    if secret_exists "$SECRET_CLIENT"; then
+      printf '%s' "$CLIENT_SECRET" | gcloud secrets versions add "$SECRET_CLIENT" --data-file=- >/dev/null
+    else
+      printf '%s' "$CLIENT_SECRET" |
+        gcloud secrets create "$SECRET_CLIENT" --data-file=- --replication-policy=automatic >/dev/null
+    fi
+    echo "Saved the Client secret that ends in ${CLIENT_SECRET: -4}."
+    break
+  elif secret_exists "$SECRET_CLIENT"; then
+    echo "Keeping the Client secret you saved before."
+    break
+  else
+    echo "Nothing was pasted. Try again."
+  fi
+  if ((attempt == 5)); then false; fi
+done
+unset CLIENT_SECRET
 
 # ---------------------------------------------------------------------------
 bold "Step 4 of 6: Who is allowed to use this server"
 echo "Only these Google accounts can use it. Use the email you log into Google Ads with."
 echo "For more than one, separate them with commas."
-DEFAULT_EMAILS="$(existing_env ALLOWED_EMAILS)"
+DEFAULT_EMAILS="${SAVED_ALLOWED_EMAILS:-$(existing_env ALLOWED_EMAILS)}"
 DEFAULT_EMAILS="${DEFAULT_EMAILS:-$(gcloud config get-value account 2>/dev/null || true)}"
 ALLOWED_EMAILS="$(ask "Allowed email(s)" "$DEFAULT_EMAILS")"
 ALLOWED_EMAILS="${ALLOWED_EMAILS//[[:space:]]/}"
@@ -179,18 +221,27 @@ if [[ $ALLOWED_EMAILS != *@* ]]; then
   echo "Please enter at least one email address." >&2
   false
 fi
+save_setting SAVED_ALLOWED_EMAILS "$ALLOWED_EMAILS"
 
 echo
 echo "Do you reach your ad accounts through a manager account (MCC)?"
 echo "If yes, type its 10-digit customer ID. If no, just press Enter."
-LOGIN_CUSTOMER_ID="$(ask "Manager account ID" "$(existing_env GOOGLE_ADS_LOGIN_CUSTOMER_ID)")"
+if [[ -n ${SAVED_LOGIN_CUSTOMER_ID+x} ]]; then
+  DEFAULT_MCC="$SAVED_LOGIN_CUSTOMER_ID"
+else
+  DEFAULT_MCC="$(existing_env GOOGLE_ADS_LOGIN_CUSTOMER_ID)"
+fi
+if [[ -n $DEFAULT_MCC ]]; then
+  echo "To stop using a manager account, type none."
+fi
+LOGIN_CUSTOMER_ID="$(ask "Manager account ID" "$DEFAULT_MCC")"
 LOGIN_CUSTOMER_ID="${LOGIN_CUSTOMER_ID//[^0-9]/}"
 if [[ -n $LOGIN_CUSTOMER_ID && ${#LOGIN_CUSTOMER_ID} -ne 10 ]]; then
   echo "A manager account ID has 10 digits, like 123-456-7890." >&2
   false
 fi
+save_setting SAVED_LOGIN_CUSTOMER_ID "$LOGIN_CUSTOMER_ID"
 
-echo
 echo "Thanks. The rest runs by itself and takes about 5 to 10 minutes."
 
 # ---------------------------------------------------------------------------
@@ -217,15 +268,6 @@ retry gcloud projects add-iam-policy-binding "$PROJECT_ID" --quiet --condition=N
   --member="serviceAccount:${BUILDER_SA}" --role=roles/run.builder
 
 # Secrets live in Secret Manager, not in the code or settings.
-if [[ -n $CLIENT_SECRET ]]; then
-  if secret_exists "$SECRET_CLIENT"; then
-    printf '%s' "$CLIENT_SECRET" | gcloud secrets versions add "$SECRET_CLIENT" --data-file=- >/dev/null
-  else
-    printf '%s' "$CLIENT_SECRET" |
-      gcloud secrets create "$SECRET_CLIENT" --data-file=- --replication-policy=automatic >/dev/null
-  fi
-fi
-unset CLIENT_SECRET
 ensure_random_secret "$SECRET_JWT"
 ensure_random_secret "$SECRET_STORAGE"
 for secret in "$SECRET_CLIENT" "$SECRET_JWT" "$SECRET_STORAGE"; do
