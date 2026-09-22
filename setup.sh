@@ -50,6 +50,22 @@ retry() {
 
 secret_exists() { gcloud secrets describe "$1" >/dev/null 2>&1; }
 
+# Asks Google whether a Client ID and secret belong together. It sends a
+# made-up sign-in code on purpose: Google answers "invalid_client" only when
+# the ID or secret is wrong. Prints what Google said and fails on a bad pair.
+check_client() {
+  local reply
+  reply="$(printf '%s' "$2" | curl -s --max-time 15 https://oauth2.googleapis.com/token \
+    --data-urlencode "client_id=$1" --data-urlencode "client_secret@-" \
+    -d grant_type=authorization_code -d code=setup-check \
+    --data-urlencode "redirect_uri=${REDIRECT_URI}" || true)"
+  if [[ $reply == *'"invalid_client"'* ]]; then
+    echo "Google says this Client ID and Client secret don't work together:"
+    printf '%s\n' "$reply" | grep -o '"error_description"[^,}]*' || true
+    return 1
+  fi
+}
+
 # Creates a secret holding a random value, once. Never replaced, so people
 # stay signed in when you run this script again.
 ensure_random_secret() {
@@ -190,18 +206,27 @@ for attempt in 1 2 3 4 5; do
   if [[ $CLIENT_SECRET == *.apps.googleusercontent.com ]]; then
     echo "That's the Client ID. The secret is the other value, and it often starts with GOCSPX-."
   elif [[ -n $CLIENT_SECRET ]]; then
-    # Saved right away in Secret Manager, so a second run won't need it again.
-    if secret_exists "$SECRET_CLIENT"; then
-      printf '%s' "$CLIENT_SECRET" | gcloud secrets versions add "$SECRET_CLIENT" --data-file=- >/dev/null
-    else
-      printf '%s' "$CLIENT_SECRET" |
-        gcloud secrets create "$SECRET_CLIENT" --data-file=- --replication-policy=automatic >/dev/null
+    if check_client "$CLIENT_ID" "$CLIENT_SECRET"; then
+      # Saved right away in Secret Manager, so a second run won't need it again.
+      if secret_exists "$SECRET_CLIENT"; then
+        printf '%s' "$CLIENT_SECRET" | gcloud secrets versions add "$SECRET_CLIENT" --data-file=- >/dev/null
+      else
+        printf '%s' "$CLIENT_SECRET" |
+          gcloud secrets create "$SECRET_CLIENT" --data-file=- --replication-policy=automatic >/dev/null
+      fi
+      echo "Google accepted it. Saved the Client secret that ends in ${CLIENT_SECRET: -4}."
+      break
     fi
-    echo "Saved the Client secret that ends in ${CLIENT_SECRET: -4}."
-    break
+    echo "Make sure the secret is turned on and comes from the same client as the Client ID above."
   elif secret_exists "$SECRET_CLIENT"; then
-    echo "Keeping the Client secret you saved before."
-    break
+    SAVED_SECRET="$(gcloud secrets versions access latest --secret="$SECRET_CLIENT" 2>/dev/null || true)"
+    if check_client "$CLIENT_ID" "$SAVED_SECRET"; then
+      echo "Keeping the Client secret you saved before (ends in ${SAVED_SECRET: -4})."
+      unset SAVED_SECRET
+      break
+    fi
+    unset SAVED_SECRET
+    echo "The saved secret doesn't work anymore. Paste the current one from your client's page."
   else
     echo "Nothing was pasted. Try again."
   fi
