@@ -59,6 +59,7 @@ You don't need a developer token. Google stopped requiring them on September 9, 
 1. In Claude go to **Customize → Connectors**, click **+**, then **Add custom connector**.
 2. Name: `Google Ads`. URL: the one from step 4. Click **Add**.
 3. Click **Connect**, approve, pick your Google account, and click **Allow**.
+4. Still in **Customize → Connectors**, click the **Google Ads** connector. Set **apply_change** to **Needs approval** ([Claude docs](https://claude.com/docs/connectors/custom/remote-mcp)). That's the only tool that changes your accounts, and with this setting Claude asks you every time before using it.
 
 On a Team or Enterprise plan, an Owner adds it under **Organization settings → Connectors** first.
 
@@ -82,7 +83,7 @@ Every change happens in two steps:
 1. **Preview.** Claude looks up what's there now and asks Google to test the change without making it ([Google docs](https://developers.google.com/google-ads/api/docs/concepts/api-structure)). You see a before-and-after list plus any warnings.
 2. **Apply.** Only after you say yes does Claude make the change. It can only apply the exact change you previewed. A preview expires after an hour and can be used once.
 
-Claude asks your permission before it uses a connector tool, unless you pick "Allow always" for that tool ([Claude help](https://support.claude.com/en/articles/11176164-use-connectors-to-extend-claude-s-capabilities)). The tool that makes changes is called `apply_change`. The preview tools never change anything.
+The tool that makes changes is called `apply_change`. Keep it on **Needs approval** (setup step 5) so Claude asks you every time. When Claude asks, don't click **Always allow**, because that stops the asking. The preview tools never change anything.
 
 Every change shows up in your Google Ads change history as made through the API ([Google Ads help](https://support.google.com/google-ads/answer/19888?hl=en)).
 
