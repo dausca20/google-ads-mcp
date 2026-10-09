@@ -37,6 +37,7 @@ CHANGE_CODE_LIFETIME_SECONDS = 60 * 60
 MAX_NEGATIVE_KEYWORDS = 200
 MAX_STATUS_ITEMS = 100
 MAX_BID_ADJUSTMENTS = 50
+MAX_CONVERSION_ACTIONS = 20
 
 SMART_BIDDING = {
     "MAXIMIZE_CONVERSIONS",
@@ -168,6 +169,7 @@ _MUTATE_CALLS = {
     "ad_group_ads": ("AdGroupAdService", "mutate_ad_group_ads", "MutateAdGroupAdsRequest"),
     "campaigns": ("CampaignService", "mutate_campaigns", "MutateCampaignsRequest"),
     "ad_groups": ("AdGroupService", "mutate_ad_groups", "MutateAdGroupsRequest"),
+    "conversion_actions": ("ConversionActionService", "mutate_conversion_actions", "MutateConversionActionsRequest"),
 }
 
 
@@ -274,11 +276,45 @@ def _build_bid_adjustments(client, customer_id: str, p: dict):
     return "campaign_criteria", operations
 
 
+ATTRIBUTION_MODELS = {
+    "DATA_DRIVEN": "GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN",
+    "LAST_CLICK": "GOOGLE_ADS_LAST_CLICK",
+}
+
+
+def _build_new_conversion_actions(client, customer_id: str, p: dict):
+    enums = client.enums
+    operations = []
+    for action in p["actions"]:
+        operation = client.get_type("ConversionActionOperation")
+        created = operation.create
+        created.name = action["name"]
+        created.type_ = enums.ConversionActionTypeEnum[action["type"]]
+        created.category = enums.ConversionActionCategoryEnum[action["category"]]
+        created.status = enums.ConversionActionStatusEnum.ENABLED
+        created.primary_for_goal = action["primary"]
+        created.counting_type = enums.ConversionActionCountingTypeEnum[action["counting"]]
+        created.click_through_lookback_window_days = action["click_through_days"]
+        if action["view_through_days"] is not None:
+            created.view_through_lookback_window_days = action["view_through_days"]
+        if action["call_length_seconds"] is not None:
+            created.phone_call_duration_seconds = action["call_length_seconds"]
+        created.value_settings.default_value = action["value"]
+        created.value_settings.default_currency_code = p["currency"]
+        created.value_settings.always_use_default_value = action["always_use_value"]
+        created.attribution_model_settings.attribution_model = enums.AttributionModelEnum[
+            ATTRIBUTION_MODELS[action["attribution"]]
+        ]
+        operations.append(operation)
+    return "conversion_actions", operations
+
+
 _BUILDERS = {
     "negative_keywords": _build_negative_keywords,
     "new_search_ad": _build_new_search_ad,
     "status_change": _build_status_change,
     "bid_adjustments": _build_bid_adjustments,
+    "new_conversion_actions": _build_new_conversion_actions,
 }
 
 
@@ -749,6 +785,200 @@ def preview_bid_adjustments(
     return _preview("bid_adjustments", customer_id, params, title, details, warnings=warnings)
 
 
+CONVERSION_TYPES = {
+    "WEBPAGE": "Website, fired by a tag (for example a form submit in Tag Manager)",
+    "CLICK_TO_CALL": "Clicks on a phone number on the website",
+    "WEBSITE_CALL": "Calls to a Google forwarding number on the website",
+}
+DEFAULT_CATEGORY = {
+    "WEBPAGE": "SUBMIT_LEAD_FORM",
+    "CLICK_TO_CALL": "PHONE_CALL_LEAD",
+    "WEBSITE_CALL": "PHONE_CALL_LEAD",
+}
+DEFAULT_CALL_LENGTH_SECONDS = 60
+
+
+class NewConversionAction(BaseModel):
+    name: str = Field(description="Name shown in Google Ads, for example: Hero Form Success")
+    type: Literal["WEBPAGE", "CLICK_TO_CALL", "WEBSITE_CALL"] = Field(
+        description="WEBPAGE: a website conversion fired by a tag, like a form submit. "
+        "CLICK_TO_CALL: clicks on a phone number on the website. "
+        "WEBSITE_CALL: calls to a Google forwarding number shown on the website."
+    )
+    category: Literal[
+        "SUBMIT_LEAD_FORM", "PHONE_CALL_LEAD", "REQUEST_QUOTE", "BOOK_APPOINTMENT",
+        "CONTACT", "SIGNUP", "PURCHASE", "PAGE_VIEW", "OUTBOUND_CLICK", "DEFAULT",
+    ] | None = Field(
+        default=None,
+        description="Goal category. Defaults to SUBMIT_LEAD_FORM for WEBPAGE and PHONE_CALL_LEAD for calls. DEFAULT means Other.",
+    )
+    primary: bool = Field(default=True, description="True for a Primary action (used for bidding), False for Secondary.")
+    value: float = Field(default=1, description="Conversion value in the account's currency.")
+    always_use_value: bool = Field(
+        default=True,
+        description="True: use this value for every conversion. False: use the value the tag sends, with this as the fallback.",
+    )
+    counting: Literal["ONE_PER_CLICK", "MANY_PER_CLICK"] = Field(
+        default="ONE_PER_CLICK", description="ONE_PER_CLICK is 'One', MANY_PER_CLICK is 'Every'."
+    )
+    click_through_days: int = Field(default=30, description="Click-through conversion window, 1 to 90 days.")
+    view_through_days: int | None = Field(
+        default=None, description="Optional view-through conversion window, 1 to 30 days. Leave empty for Google's default."
+    )
+    call_length_seconds: int | None = Field(
+        default=None,
+        description="WEBSITE_CALL only: shortest call that counts, in seconds. Defaults to 60.",
+    )
+    attribution: Literal["DATA_DRIVEN", "LAST_CLICK"] = Field(default="DATA_DRIVEN")
+
+
+def _conversion_text(action: dict, currency: str) -> str:
+    parts = [
+        CONVERSION_TYPES[action["type"]],
+        f"category {action['category'].replace('_', ' ').lower()}",
+        "Primary" if action["primary"] else "Secondary",
+        f"value {action['value']:g} {currency}"
+        + (" for every conversion" if action["always_use_value"] else " unless the tag sends one"),
+        "One conversion per click" if action["counting"] == "ONE_PER_CLICK" else "Every conversion",
+        f"{action['click_through_days']}-day click-through window",
+    ]
+    if action["view_through_days"] is not None:
+        parts.append(f"{action['view_through_days']}-day view-through window")
+    if action["call_length_seconds"] is not None:
+        parts.append(f"counts calls of {action['call_length_seconds']}+ seconds")
+    parts.append("data-driven attribution" if action["attribution"] == "DATA_DRIVEN" else "last-click attribution")
+    return f"\"{action['name']}\": " + ", ".join(parts)
+
+
+@changes_mcp.tool(annotations=PREVIEW)
+def preview_new_conversion_actions(
+    customer_id: str | int,
+    actions: list[NewConversionAction],
+) -> dict[str, Any]:
+    """Previews creating conversion actions. Nothing changes yet.
+
+    Supports website conversions fired by a tag (form submits), clicks on a
+    phone number, and calls to a Google forwarding number on the website.
+    Names already in the account are skipped. Google's API has no setting
+    for a call action's phone number (that lives in the Tag Manager tag) or
+    the engaged-view window. After apply_change, it returns each new action's
+    conversion ID and label for Tag Manager. Returns a change_code for
+    apply_change.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    if not actions:
+        raise ToolError("Give at least one conversion action.")
+    if len(actions) > MAX_CONVERSION_ACTIONS:
+        raise ToolError(f"Create at most {MAX_CONVERSION_ACTIONS} conversion actions at a time.")
+
+    problems = []
+    for number, action in enumerate(actions, start=1):
+        label = f"Action {number} (\"{action.name.strip()}\")"
+        if not action.name.strip():
+            problems.append(f"Action {number} has no name.")
+        if action.value < 0:
+            problems.append(f"{label}: value can't be negative.")
+        if not 1 <= action.click_through_days <= 90:
+            problems.append(f"{label}: click-through window must be 1 to 90 days.")
+        if action.view_through_days is not None and not 1 <= action.view_through_days <= 30:
+            problems.append(f"{label}: view-through window must be 1 to 30 days.")
+        if action.call_length_seconds is not None:
+            if action.type != "WEBSITE_CALL":
+                problems.append(f"{label}: call length only applies to WEBSITE_CALL.")
+            elif action.call_length_seconds < 0:
+                problems.append(f"{label}: call length can't be negative.")
+    if problems:
+        raise ToolError("Fix these first:\n- " + "\n- ".join(problems))
+
+    account = _rows(
+        customer_id,
+        "SELECT customer.descriptive_name, customer.currency_code, "
+        "customer.call_reporting_setting.call_reporting_enabled FROM customer",
+    )
+    if not account:
+        raise ToolError(f"Couldn't read account {customer_id}.")
+    account = account[0].customer
+    existing = _rows(
+        customer_id,
+        "SELECT conversion_action.name FROM conversion_action "
+        "WHERE conversion_action.status != 'REMOVED'",
+    )
+    existing_names = {r.conversion_action.name.strip().lower() for r in existing}
+
+    to_add, skipped, seen = [], [], set()
+    for action in actions:
+        name = " ".join(action.name.split())
+        key = name.lower()
+        if key in existing_names:
+            skipped.append(f"\"{name}\": a conversion action with this name already exists")
+            continue
+        if key in seen:
+            skipped.append(f"\"{name}\": listed twice")
+            continue
+        seen.add(key)
+        call_length = action.call_length_seconds
+        if action.type == "WEBSITE_CALL" and call_length is None:
+            call_length = DEFAULT_CALL_LENGTH_SECONDS
+        to_add.append({
+            "name": name,
+            "type": action.type,
+            "category": action.category or DEFAULT_CATEGORY[action.type],
+            "primary": action.primary,
+            "value": action.value,
+            "always_use_value": action.always_use_value,
+            "counting": action.counting,
+            "click_through_days": action.click_through_days,
+            "view_through_days": action.view_through_days,
+            "call_length_seconds": call_length,
+            "attribution": action.attribution,
+        })
+    if not to_add:
+        raise ToolError("Nothing to create. Every conversion action already exists.")
+
+    warnings = []
+    if any(a["type"] == "WEBSITE_CALL" for a in to_add):
+        warnings.append(
+            "Google's API has no phone number setting for calls from website. The number "
+            "comes from the Tag Manager 'Calls from Website Conversion' tag."
+        )
+        if not account.call_reporting_setting.call_reporting_enabled:
+            warnings.append(
+                "Call reporting is off in this account, so calls from website won't be "
+                "tracked. Turn it on under Admin > Account settings > Call reporting."
+            )
+
+    currency = account.currency_code
+    params = {"currency": currency, "actions": to_add}
+    title = f"Create {len(to_add)} conversion action(s) in \"{account.descriptive_name}\" ({customer_id})"
+    details = [_conversion_text(a, currency) for a in to_add]
+    return _preview("new_conversion_actions", customer_id, params, title, details, skipped, warnings)
+
+
+TAG_ID_PATTERN = re.compile(r"AW-(\d+)/([A-Za-z0-9_-]+)")
+
+
+def _tag_manager_ids(customer_id: str, resource_names: list[str]) -> list[dict]:
+    """Looks up the conversion ID and label Tag Manager needs for new actions."""
+    ids = ",".join(_id(name.rsplit("/", 1)[-1], "conversion action ID") for name in resource_names)
+    found = []
+    for r in _rows(
+        customer_id,
+        "SELECT conversion_action.name, conversion_action.tag_snippets FROM conversion_action "
+        f"WHERE conversion_action.id IN ({ids})",
+    ):
+        match = None
+        for snippet in r.conversion_action.tag_snippets:
+            match = TAG_ID_PATTERN.search(snippet.event_snippet) or TAG_ID_PATTERN.search(snippet.global_site_tag)
+            if match:
+                break
+        found.append({
+            "name": r.conversion_action.name,
+            "conversion_id": match.group(1) if match else None,
+            "conversion_label": match.group(2) if match else None,
+        })
+    return found
+
+
 @changes_mcp.tool(annotations=APPLY)
 def apply_change(change_code: str) -> dict[str, Any]:
     """Makes a change in Google Ads that a preview tool prepared.
@@ -761,9 +991,17 @@ def apply_change(change_code: str) -> dict[str, Any]:
     target, operations = _BUILDERS[payload["kind"]](client, payload["customer_id"], payload["params"])
     response = _send(payload["customer_id"], target, operations, validate_only=False)
     _used_nonces.add(payload["nonce"])
-    return {
+    resource_names = [result.resource_name for result in response.results]
+    result = {
         "done": payload["title"],
         "items_changed": len(response.results),
-        "resource_names": [result.resource_name for result in response.results],
+        "resource_names": resource_names,
         "note": "This change shows in the account's Google Ads change history.",
     }
+    if payload["kind"] == "new_conversion_actions":
+        # The change is already made, so a failed lookup only loses the labels.
+        try:
+            result["tag_manager"] = _tag_manager_ids(payload["customer_id"], resource_names)
+        except Exception:
+            result["tag_manager"] = "Couldn't read the new labels. Find them under each action's Tag setup in Google Ads."
+    return result

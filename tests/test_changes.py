@@ -532,6 +532,175 @@ def test_bid_adjustments_reject_bad_input(google):
     assert google.requests == []
 
 
+# --- Conversion actions -------------------------------------------------------
+
+
+def conversion_account(*existing, call_reporting=True):
+    return [
+        (
+            "FROM customer",
+            [
+                row(
+                    customer__descriptive_name="The Maids [NEW]",
+                    customer__currency_code="USD",
+                    customer__call_reporting_setting__call_reporting_enabled=call_reporting,
+                )
+            ],
+        ),
+        ("FROM conversion_action WHERE conversion_action.status", [row(conversion_action__name=n) for n in existing]),
+    ]
+
+
+def test_new_conversion_actions_preview_only_validates(google):
+    google.results = conversion_account("Hero Form Success")
+    preview = changes.preview_new_conversion_actions(
+        customer_id="766-751-7850",
+        actions=[
+            changes.NewConversionAction(name="Popup Form 1 Success", type="WEBPAGE", click_through_days=90, view_through_days=1),
+            changes.NewConversionAction(name="Click to call success", type="CLICK_TO_CALL", view_through_days=1),
+            changes.NewConversionAction(name="Call West Valley", type="WEBSITE_CALL"),
+            changes.NewConversionAction(name="hero form  success", type="WEBPAGE"),
+            changes.NewConversionAction(name="Popup Form 1 Success", type="WEBPAGE"),
+        ],
+    )
+    assert preview["preview"] == 'Create 3 conversion action(s) in "The Maids [NEW]" (7667517850)'
+    assert preview["changes"][0] == (
+        '"Popup Form 1 Success": Website, fired by a tag (for example a form submit in Tag Manager), '
+        "category submit lead form, Primary, value 1 USD for every conversion, One conversion per click, "
+        "90-day click-through window, 1-day view-through window, data-driven attribution"
+    )
+    assert "counts calls of 60+ seconds" in preview["changes"][2]
+    assert preview["skipped"] == [
+        '"hero form success": a conversion action with this name already exists',
+        '"Popup Form 1 Success": listed twice',
+    ]
+    assert "no phone number setting" in preview["warnings"][0]
+    assert len(preview["warnings"]) == 1
+
+    [(service, method, request)] = google.requests
+    assert (service, method) == ("ConversionActionService", "mutate_conversion_actions")
+    assert request.validate_only is True
+    assert request.customer_id == "7667517850"
+    form, click, call = [op.create for op in request.operations]
+    assert (form.name, form.type_.name, form.category.name) == ("Popup Form 1 Success", "WEBPAGE", "SUBMIT_LEAD_FORM")
+    assert form.status.name == "ENABLED"
+    assert form.primary_for_goal is True
+    assert form.counting_type.name == "ONE_PER_CLICK"
+    assert (form.click_through_lookback_window_days, form.view_through_lookback_window_days) == (90, 1)
+    assert "phone_call_duration_seconds" not in form
+    assert form.value_settings.default_value == 1
+    assert form.value_settings.default_currency_code == "USD"
+    assert form.value_settings.always_use_default_value is True
+    assert form.attribution_model_settings.attribution_model.name == "GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN"
+    assert (click.type_.name, click.category.name) == ("CLICK_TO_CALL", "PHONE_CALL_LEAD")
+    assert (call.type_.name, call.phone_call_duration_seconds) == ("WEBSITE_CALL", 60)
+    assert "view_through_lookback_window_days" not in call
+
+
+def test_new_conversion_actions_secondary_and_other_settings(google):
+    google.results = conversion_account()
+    changes.preview_new_conversion_actions(
+        customer_id="1",
+        actions=[
+            changes.NewConversionAction(
+                name="Quote page", type="WEBPAGE", category="REQUEST_QUOTE", primary=False, value=0,
+                always_use_value=False, counting="MANY_PER_CLICK", attribution="LAST_CLICK",
+            )
+        ],
+    )
+    created = google.requests[0][2].operations[0].create
+    assert created.primary_for_goal is False
+    assert created.category.name == "REQUEST_QUOTE"
+    assert created.counting_type.name == "MANY_PER_CLICK"
+    assert created.value_settings.always_use_default_value is False
+    assert created.attribution_model_settings.attribution_model.name == "GOOGLE_ADS_LAST_CLICK"
+
+
+def test_new_conversion_actions_warn_when_call_reporting_is_off(google):
+    google.results = conversion_account(call_reporting=False)
+    preview = changes.preview_new_conversion_actions(
+        customer_id="1", actions=[changes.NewConversionAction(name="Call", type="WEBSITE_CALL")]
+    )
+    assert "Call reporting is off" in preview["warnings"][1]
+
+
+def test_new_conversion_actions_reject_bad_input(google):
+    google.results = conversion_account()
+    with pytest.raises(ToolError) as error:
+        changes.preview_new_conversion_actions(
+            customer_id="1",
+            actions=[
+                changes.NewConversionAction(name=" ", type="WEBPAGE"),
+                changes.NewConversionAction(name="Form", type="WEBPAGE", value=-1, click_through_days=91, view_through_days=31),
+                changes.NewConversionAction(name="Click", type="CLICK_TO_CALL", call_length_seconds=60),
+            ],
+        )
+    message = str(error.value)
+    for expected in [
+        "Action 1 has no name",
+        "value can't be negative",
+        "click-through window must be 1 to 90 days",
+        "view-through window must be 1 to 30 days",
+        "call length only applies to WEBSITE_CALL",
+    ]:
+        assert expected in message
+    google.results = conversion_account("Form")
+    with pytest.raises(ToolError, match="Nothing to create"):
+        changes.preview_new_conversion_actions(
+            customer_id="1", actions=[changes.NewConversionAction(name="Form", type="WEBPAGE")]
+        )
+    assert google.requests == []
+
+
+def test_applying_conversion_actions_returns_tag_manager_ids(google):
+    google.results = conversion_account() + [
+        (
+            "WHERE conversion_action.id IN",
+            [
+                row(conversion_action__name="Popup Form 1 Success"),
+                row(conversion_action__name="Call West Valley"),
+            ],
+        )
+    ]
+    form_snippet = CLIENT.get_type("TagSnippet")
+    form_snippet.event_snippet = "gtag('event', 'conversion', {'send_to': 'AW-18498205801/BvvaCPvb4pQd-EO_w0PRE'});"
+    call_snippet = CLIENT.get_type("TagSnippet")
+    call_snippet.event_snippet = "gtag('config', 'AW-18498205801/oKpgCJjG', {'phone_conversion_number': '(818) 344-4500'});"
+    google.results[-1][1][0].conversion_action.tag_snippets.append(form_snippet)
+    google.results[-1][1][1].conversion_action.tag_snippets.append(call_snippet)
+
+    preview = changes.preview_new_conversion_actions(
+        customer_id="1",
+        actions=[
+            changes.NewConversionAction(name="Popup Form 1 Success", type="WEBPAGE"),
+            changes.NewConversionAction(name="Call West Valley", type="WEBSITE_CALL"),
+        ],
+    )
+    result = changes.apply_change(preview["change_code"])
+    check, real = google.requests
+    assert real[2].validate_only is False
+    assert list(real[2].operations) == list(check[2].operations)
+    assert result["tag_manager"] == [
+        {"name": "Popup Form 1 Success", "conversion_id": "18498205801", "conversion_label": "BvvaCPvb4pQd-EO_w0PRE"},
+        {"name": "Call West Valley", "conversion_id": "18498205801", "conversion_label": "oKpgCJjG"},
+    ]
+
+
+def test_conversion_actions_stay_created_if_label_lookup_fails(google, monkeypatch):
+    google.results = conversion_account()
+    preview = changes.preview_new_conversion_actions(
+        customer_id="1", actions=[changes.NewConversionAction(name="Form", type="WEBPAGE")]
+    )
+
+    def lookup_fails(customer_id, query):
+        raise ToolError("Google said no")
+
+    monkeypatch.setattr(changes, "_rows", lookup_fails)
+    result = changes.apply_change(preview["change_code"])
+    assert result["items_changed"] == 1
+    assert "Tag setup" in result["tag_manager"]
+
+
 # --- Error text ---------------------------------------------------------------
 
 

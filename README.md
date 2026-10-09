@@ -2,7 +2,7 @@
 
 This lets Claude look at your Google Ads accounts by itself, so your skills can pull the data for you.
 
-Claude can read everything. It can also make four kinds of changes, but only after showing you a preview first (see [Making changes](#making-changes)). It can't touch budgets.
+Claude can read everything. It can also make five kinds of changes, but only after showing you a preview first (see [Making changes](#making-changes)). It can't touch budgets.
 
 ```
 Claude  ──►  your server (on Google Cloud)  ──►  Google Ads
@@ -71,7 +71,7 @@ Ask Claude: **"What Google Ads accounts can I access?"**
 
 ## Making changes
 
-Claude can do these four things:
+Claude can do these five things:
 
 | Change | What to know |
 | --- | --- |
@@ -79,6 +79,7 @@ Claude can do these four things:
 | Create a new responsive search ad | It always starts **paused**, so nothing goes live until you turn it on. Your old ads aren't touched. |
 | Pause or turn on | Campaigns, ad groups, ads, or keywords. |
 | Change bid adjustments | Location, device, and ad schedule, on targets the campaign already has. It never adds or removes targeting. |
+| Create conversion actions | Website conversions fired by a tag (like form submits), clicks on a phone number, and calls to a Google forwarding number on your site. Names already in the account are skipped. After they're made, Claude gives you each one's conversion ID and label to paste into Tag Manager. Google's API can't set a call action's phone number (that goes in the Tag Manager tag) or the engaged-view window. |
 
 Every change happens in two steps:
 

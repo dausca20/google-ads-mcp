@@ -77,6 +77,7 @@ def test_allowed_user_sees_google_ads_tools(allowlisted_server):
         "changes_apply_change",
         "changes_preview_bid_adjustments",
         "changes_preview_negative_keywords",
+        "changes_preview_new_conversion_actions",
         "changes_preview_new_search_ad",
         "changes_preview_status_change",
         "customers_list_accessible_customers",
