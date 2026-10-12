@@ -303,7 +303,8 @@ done
 # ---------------------------------------------------------------------------
 bold "Step 6 of 6: Building and starting the server (the slow part)"
 ENV_FILE="$(mktemp)"
-trap 'rm -f "$ENV_FILE"' EXIT
+POLICY_FILE="$(mktemp)"
+trap 'rm -f "$ENV_FILE" "$POLICY_FILE"' EXIT
 {
   echo "GOOGLE_PROJECT_ID: \"${PROJECT_ID}\""
   echo "GOOGLE_ADS_MCP_OAUTH_CLIENT_ID: \"${CLIENT_ID}\""
@@ -326,6 +327,29 @@ gcloud run deploy "$SERVICE" \
   --env-vars-file "$ENV_FILE" \
   --set-secrets "GOOGLE_ADS_MCP_OAUTH_CLIENT_SECRET=${SECRET_CLIENT}:latest,GOOGLE_ADS_MCP_JWT_SIGNING_KEY=${SECRET_JWT}:latest,GOOGLE_ADS_MCP_STORAGE_ENCRYPTION_KEY=${SECRET_STORAGE}:latest" \
   --quiet
+
+# Keep storage inside Google's free allowances: every run saves a new copy of
+# the server, so keep only the 2 newest copies, and destroy old versions of the
+# Client secret (only the newest one is used).
+cat >"$POLICY_FILE" <<'EOF'
+[
+  {"name": "keep-newest-2", "action": {"type": "Keep"}, "mostRecentVersions": {"keepCount": 2}},
+  {"name": "delete-older", "action": {"type": "Delete"}, "condition": {"tagState": "any", "olderThan": "1d"}}
+]
+EOF
+gcloud artifacts repositories set-cleanup-policies cloud-run-source-deploy \
+  --location="$REGION" --policy="$POLICY_FILE" --no-dry-run >/dev/null 2>&1 ||
+  echo "Note: couldn't turn on cleanup of old server copies. Everything else worked."
+NEWEST_SECRET="$(gcloud secrets versions list "$SECRET_CLIENT" --filter='state=enabled' \
+  --sort-by='~createTime' --limit=1 --format='value(name.basename())' 2>/dev/null || true)"
+if [[ -n $NEWEST_SECRET ]]; then
+  for version in $(gcloud secrets versions list "$SECRET_CLIENT" --filter='state!=destroyed' \
+    --format='value(name.basename())' 2>/dev/null || true); do
+    if [[ $version != "$NEWEST_SECRET" ]]; then
+      gcloud secrets versions destroy "$version" --secret="$SECRET_CLIENT" --quiet >/dev/null 2>&1 || true
+    fi
+  done
+fi
 
 # Quick check that the server answers the way Claude expects.
 STATUS="$(curl -s -o /dev/null -w '%{http_code}' "${BASE_URL}/.well-known/oauth-protected-resource/mcp" || true)"
