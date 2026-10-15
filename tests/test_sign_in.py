@@ -27,6 +27,7 @@ def test_claude_can_sign_in_and_use_the_server():
     assert ADS in result["asked_google_for"]
     assert (result["authorize"], result["callback"], result["token"]) == (302, 302, 200)
     assert result["mcp"] == 200
+    assert result["after_restart"] == 200
     assert result["warnings"] == []
 
 

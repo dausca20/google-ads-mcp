@@ -9,11 +9,14 @@ reading. This file adds:
 3. A home page and privacy policy (pages.py), which Google needs before the
    sign-in app can be published.
 4. A plain warning in the logs when a Google sign-in is rejected, saying why.
+5. Stateless connections, so Claude stays connected when Cloud Run restarts
+   the server (see use_stateless_connections).
 """
 
 import logging
 import os
 
+import fastmcp
 import httpx2
 
 from fastmcp.server.auth import AccessToken
@@ -122,7 +125,20 @@ def add_email_allowlist() -> None:
     mcp.add_middleware(AuthMiddleware(auth=check))
 
 
+def use_stateless_connections() -> None:
+    """Treats every request from Claude on its own instead of as part of a session.
+
+    Cloud Run stops the server when it sits idle (up to 15 minutes) and starts a
+    fresh copy on the next request. Sessions live only in memory, so the fresh
+    copy answers Claude's next call with "Session not found" and the connector
+    shows as disconnected. Without sessions there is nothing to lose. Sign-ins
+    are kept in Firestore, so they survive restarts either way.
+    """
+    fastmcp.settings.stateless_http = True
+
+
 def main() -> None:
+    use_stateless_connections()
     if oauth_is_enabled():
         add_email_allowlist()
         add_sign_in_explanations()

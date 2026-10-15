@@ -96,6 +96,7 @@ If a campaign uses Smart Bidding (like Maximize conversions or Target CPA), the 
 
 - **Auction insights can't be pulled this way.** Google doesn't make them public through the API ([Google Ads API forum](https://groups.google.com/g/adwords-api/c/30s21wGZkOU)), so the auction insights part of your competitor report still needs an export you download yourself.
 - **Cost:** a few uses a month should fit inside Google Cloud's free monthly allowances once your free trial ends and you upgrade to a paid account ([Cloud Run pricing](https://cloud.google.com/run/pricing)). The setup script keeps only the 2 newest copies of the server and the newest Client secret, so storage stays inside the free amounts too.
+- **Staying connected:** Google Cloud shuts the server off after it sits idle (up to 15 minutes) and starts it again on your next request ([Cloud Run docs](https://cloud.google.com/run/docs/about-instance-autoscaling)). The server handles each request on its own, so Claude stays connected through that. The first request after a quiet spell can take a few extra seconds while it starts.
 - **Daily limit:** Explorer access allows 2,880 operations a day ([Google docs](https://developers.google.com/google-ads/api/docs/api-policy/access-levels)).
 - **Update the server or change settings** (like who can use it, or your manager account): in Cloud Shell run `cd google-ads-mcp && git pull && bash setup.sh`. Press Enter to keep anything you don't want to change.
 - **Manager account (MCC):** if you enter one in the script, Claude reaches all your accounts through it.

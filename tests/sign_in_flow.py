@@ -91,6 +91,7 @@ class KeepWarnings(logging.Handler):
 
 
 logging.getLogger("google_ads_mcp").addHandler(KeepWarnings(level=logging.WARNING))
+server.use_stateless_connections()
 server.add_email_allowlist()
 server.add_sign_in_explanations()
 
@@ -124,10 +125,11 @@ with TestClient(server.mcp.http_app(), base_url="http://localhost", follow_redir
         "client_id": CLAUDE["client_id"], "code_verifier": verifier, "resource": "http://localhost/mcp",
     })
     result["token"] = response.status_code
+    bearer = response.json().get("access_token")
     response = client.post(
         "/mcp",
         headers={
-            "authorization": f"Bearer {response.json()['access_token']}",
+            "authorization": f"Bearer {bearer}",
             "accept": "application/json, text/event-stream",
         },
         json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -136,6 +138,18 @@ with TestClient(server.mcp.http_app(), base_url="http://localhost", follow_redir
         }},
     )
     result["mcp"] = response.status_code
+    session_id = response.headers.get("mcp-session-id")
+
+# Cloud Run stops the server after it sits idle, so Claude's next call reaches
+# a fresh copy. That call has to work without signing in or starting over.
+with TestClient(server.mcp.http_app(), base_url="http://localhost") as client:
+    headers = {"authorization": f"Bearer {bearer}", "accept": "application/json, text/event-stream"}
+    if session_id:
+        headers["mcp-session-id"] = session_id
+    response = client.post(
+        "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
+    )
+    result["after_restart"] = response.status_code
 
 result["warnings"] = warnings
 print(json.dumps(result))
