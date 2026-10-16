@@ -170,6 +170,9 @@ _MUTATE_CALLS = {
     "campaigns": ("CampaignService", "mutate_campaigns", "MutateCampaignsRequest"),
     "ad_groups": ("AdGroupService", "mutate_ad_groups", "MutateAdGroupsRequest"),
     "conversion_actions": ("ConversionActionService", "mutate_conversion_actions", "MutateConversionActionsRequest"),
+    # Several kinds of operations in one all-or-nothing request (new callouts
+    # are created and attached together).
+    "google_ads": ("GoogleAdsService", "mutate", "MutateGoogleAdsRequest"),
 }
 
 
@@ -178,7 +181,10 @@ def _send(customer_id: str, target: str, operations: list, validate_only: bool):
     service = utils.get_googleads_service(service_name)
     request = utils.get_googleads_type(request_type)
     request.customer_id = customer_id
-    request.operations.extend(operations)
+    if target == "google_ads":
+        request.mutate_operations.extend(operations)
+    else:
+        request.operations.extend(operations)
     request.validate_only = validate_only
     try:
         return getattr(service, method)(request=request)
@@ -309,13 +315,65 @@ def _build_new_conversion_actions(client, customer_id: str, p: dict):
     return "conversion_actions", operations
 
 
+def _build_new_keywords(client, customer_id: str, p: dict):
+    operations = []
+    for keyword in p["keywords"]:
+        operation = client.get_type("AdGroupCriterionOperation")
+        criterion = operation.create
+        criterion.ad_group = f"customers/{customer_id}/adGroups/{p['ad_group_id']}"
+        criterion.status = client.enums.AdGroupCriterionStatusEnum[p["status"]]
+        criterion.keyword.text = keyword["text"]
+        criterion.keyword.match_type = client.enums.KeywordMatchTypeEnum[keyword["match_type"]]
+        if keyword.get("max_cpc") is not None:
+            criterion.cpc_bid_micros = round(keyword["max_cpc"] * 1_000_000)
+        operations.append(operation)
+    return "ad_group_criteria", operations
+
+
+def _build_new_callouts(client, customer_id: str, p: dict):
+    # Each callout is a new asset (temporary IDs -1, -2, ...) plus a link that
+    # attaches it to the account, a campaign, or an ad group.
+    operations = []
+    for number, text in enumerate(p["callouts"], start=1):
+        asset_name = f"customers/{customer_id}/assets/-{number}"
+        create_asset = client.get_type("MutateOperation")
+        create_asset.asset_operation.create.resource_name = asset_name
+        create_asset.asset_operation.create.callout_asset.callout_text = text
+        attach = client.get_type("MutateOperation")
+        if p["level"] == "campaign":
+            link = attach.campaign_asset_operation.create
+            link.campaign = f"customers/{customer_id}/campaigns/{p['target_id']}"
+        elif p["level"] == "ad_group":
+            link = attach.ad_group_asset_operation.create
+            link.ad_group = f"customers/{customer_id}/adGroups/{p['target_id']}"
+        else:
+            link = attach.customer_asset_operation.create
+        link.asset = asset_name
+        link.field_type = client.enums.AssetFieldTypeEnum.CALLOUT
+        operations += [create_asset, attach]
+    return "google_ads", operations
+
+
 _BUILDERS = {
     "negative_keywords": _build_negative_keywords,
     "new_search_ad": _build_new_search_ad,
     "status_change": _build_status_change,
     "bid_adjustments": _build_bid_adjustments,
     "new_conversion_actions": _build_new_conversion_actions,
+    "new_keywords": _build_new_keywords,
+    "new_callouts": _build_new_callouts,
 }
+
+
+def _result_names(response) -> list[str]:
+    """Resource names Google returned, for either kind of request."""
+    if hasattr(response, "mutate_operation_responses"):
+        names = []
+        for item in response.mutate_operation_responses:
+            kind = type(item).pb(item).WhichOneof("response")
+            names.append(getattr(item, kind).resource_name)
+        return names
+    return [result.resource_name for result in response.results]
 
 
 def _check_with_google(kind: str, customer_id: str, params: dict) -> None:
@@ -979,6 +1037,172 @@ def _tag_manager_ids(customer_id: str, resource_names: list[str]) -> list[dict]:
     return found
 
 
+class NewKeyword(BaseModel):
+    text: str = Field(description="The keyword text, for example: house cleaning near me")
+    match_type: Literal["EXACT", "PHRASE", "BROAD"] = Field(description="EXACT, PHRASE, or BROAD")
+    max_cpc: float | None = Field(
+        default=None,
+        description="Optional max cost per click in the account's currency, for example 2.50. Leave empty to use the ad group's bid.",
+    )
+
+
+@changes_mcp.tool(annotations=PREVIEW)
+def preview_new_keywords(
+    customer_id: str | int,
+    ad_group_id: str | int,
+    keywords: list[NewKeyword],
+    status: Literal["ENABLED", "PAUSED"],
+) -> dict[str, Any]:
+    """Previews adding keywords to one ad group in a Search campaign. Nothing changes yet.
+
+    status: ENABLED keywords can start spending as soon as they are applied;
+    PAUSED keywords wait until someone turns them on with preview_status_change.
+    Ask the user which they want. Keywords already in the ad group are skipped.
+    Returns a change_code for apply_change.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    ad_group_id = _id(ad_group_id, "ad_group_id")
+    if not keywords:
+        raise ToolError("Give at least one keyword.")
+    if len(keywords) > MAX_NEGATIVE_KEYWORDS:
+        raise ToolError(f"Add at most {MAX_NEGATIVE_KEYWORDS} keywords at a time.")
+    found = _rows(
+        customer_id,
+        "SELECT ad_group.name, campaign.name, campaign.advertising_channel_type "
+        f"FROM ad_group WHERE ad_group.id = {ad_group_id}",
+    )
+    if not found:
+        raise ToolError(f"No ad group with ID {ad_group_id} in account {customer_id}.")
+    if found[0].campaign.advertising_channel_type.name != "SEARCH":
+        raise ToolError("Keywords can only be added here to ad groups in Search campaigns.")
+    existing = _rows(
+        customer_id,
+        "SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type "
+        f"FROM ad_group_criterion WHERE ad_group.id = {ad_group_id} "
+        "AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE "
+        "AND ad_group_criterion.status != REMOVED",
+    )
+    existing_keys = {
+        (r.ad_group_criterion.keyword.text.lower(), r.ad_group_criterion.keyword.match_type.name)
+        for r in existing
+    }
+    to_add, details, skipped, seen = [], [], [], set()
+    for keyword in keywords:
+        text = " ".join(keyword.text.split())
+        if not text:
+            raise ToolError("A keyword was empty.")
+        if keyword.max_cpc is not None and keyword.max_cpc <= 0:
+            raise ToolError(f"The max CPC for \"{text}\" must be more than 0.")
+        key = (text.lower(), keyword.match_type)
+        label = f"\"{text}\" ({keyword.match_type.lower()} match)"
+        if key in existing_keys:
+            skipped.append(f"{label}: already in this ad group")
+        elif key in seen:
+            skipped.append(f"{label}: listed twice")
+        else:
+            seen.add(key)
+            to_add.append({"text": text, "match_type": keyword.match_type, "max_cpc": keyword.max_cpc})
+            bid = f", max CPC {keyword.max_cpc:g}" if keyword.max_cpc is not None else ", ad group's bid"
+            details.append(label + bid)
+    if not to_add:
+        raise ToolError("Nothing to add. Every keyword is already in this ad group.")
+    warnings = []
+    if status == "ENABLED":
+        warnings.append("These keywords will be on, so they can start spending right away.")
+    params = {"ad_group_id": ad_group_id, "status": status, "keywords": to_add}
+    title = (
+        f"Add {len(to_add)} {status.lower()} keyword(s) to ad group \"{found[0].ad_group.name}\" "
+        f"({ad_group_id}), campaign \"{found[0].campaign.name}\""
+    )
+    return _preview("new_keywords", customer_id, params, title, details, skipped, warnings)
+
+
+MAX_CALLOUTS = 20
+CALLOUT_LIMIT = 25
+
+
+@changes_mcp.tool(annotations=PREVIEW)
+def preview_new_callouts(
+    customer_id: str | int,
+    callouts: list[str],
+    campaign_id: str | int | None = None,
+    ad_group_id: str | int | None = None,
+) -> dict[str, Any]:
+    """Previews adding callouts (short phrases like "Free Estimates"). Nothing changes yet.
+
+    Give campaign_id or ad_group_id to add them there, or neither to add them
+    to the whole account. Each callout is up to 25 characters. Callouts
+    already on that campaign, ad group, or account are skipped. Returns a
+    change_code for apply_change.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    if campaign_id not in (None, "") and ad_group_id not in (None, ""):
+        raise ToolError("Give campaign_id or ad_group_id, not both. Give neither for the whole account.")
+    if not callouts:
+        raise ToolError("Give at least one callout.")
+    if len(callouts) > MAX_CALLOUTS:
+        raise ToolError(f"Add at most {MAX_CALLOUTS} callouts at a time.")
+
+    if campaign_id not in (None, ""):
+        level, target_id = "campaign", _id(campaign_id, "campaign_id")
+        found = _rows(customer_id, f"SELECT campaign.name FROM campaign WHERE campaign.id = {target_id}")
+        if not found:
+            raise ToolError(f"No campaign with ID {target_id} in account {customer_id}.")
+        where = f"campaign \"{found[0].campaign.name}\" ({target_id})"
+        existing = _rows(
+            customer_id,
+            "SELECT asset.callout_asset.callout_text FROM campaign_asset "
+            f"WHERE campaign.id = {target_id} AND campaign_asset.field_type = CALLOUT "
+            "AND campaign_asset.status != REMOVED",
+        )
+    elif ad_group_id not in (None, ""):
+        level, target_id = "ad_group", _id(ad_group_id, "ad_group_id")
+        found = _rows(
+            customer_id,
+            f"SELECT ad_group.name, campaign.name FROM ad_group WHERE ad_group.id = {target_id}",
+        )
+        if not found:
+            raise ToolError(f"No ad group with ID {target_id} in account {customer_id}.")
+        where = f"ad group \"{found[0].ad_group.name}\" ({target_id}) in campaign \"{found[0].campaign.name}\""
+        existing = _rows(
+            customer_id,
+            "SELECT asset.callout_asset.callout_text FROM ad_group_asset "
+            f"WHERE ad_group.id = {target_id} AND ad_group_asset.field_type = CALLOUT "
+            "AND ad_group_asset.status != REMOVED",
+        )
+    else:
+        level, target_id, where = "account", "", f"the whole account ({customer_id})"
+        existing = _rows(
+            customer_id,
+            "SELECT asset.callout_asset.callout_text FROM customer_asset "
+            "WHERE customer_asset.field_type = CALLOUT AND customer_asset.status != REMOVED",
+        )
+    existing_texts = {r.asset.callout_asset.callout_text.lower() for r in existing}
+
+    to_add, skipped, problems, seen = [], [], [], set()
+    for raw in callouts:
+        text = " ".join(raw.split())
+        if not text:
+            problems.append("A callout was empty.")
+        elif len(text) > CALLOUT_LIMIT:
+            problems.append(f"\"{text}\" is {len(text)} characters (limit {CALLOUT_LIMIT}).")
+        elif text.lower() in existing_texts:
+            skipped.append(f"\"{text}\": already there")
+        elif text.lower() in seen:
+            skipped.append(f"\"{text}\": listed twice")
+        else:
+            seen.add(text.lower())
+            to_add.append(text)
+    if problems:
+        raise ToolError("Fix these first:\n- " + "\n- ".join(problems))
+    if not to_add:
+        raise ToolError("Nothing to add. Every callout is already there.")
+    params = {"level": level, "target_id": target_id, "callouts": to_add}
+    title = f"Add {len(to_add)} callout(s) to {where}"
+    details = [f"\"{text}\"" for text in to_add]
+    return _preview("new_callouts", customer_id, params, title, details, skipped)
+
+
 @changes_mcp.tool(annotations=APPLY)
 def apply_change(change_code: str) -> dict[str, Any]:
     """Makes a change in Google Ads that a preview tool prepared.
@@ -991,10 +1215,10 @@ def apply_change(change_code: str) -> dict[str, Any]:
     target, operations = _BUILDERS[payload["kind"]](client, payload["customer_id"], payload["params"])
     response = _send(payload["customer_id"], target, operations, validate_only=False)
     _used_nonces.add(payload["nonce"])
-    resource_names = [result.resource_name for result in response.results]
+    resource_names = _result_names(response)
     result = {
         "done": payload["title"],
-        "items_changed": len(response.results),
+        "items_changed": len(resource_names),
         "resource_names": resource_names,
         "note": "This change shows in the account's Google Ads change history.",
     }

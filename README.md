@@ -76,6 +76,8 @@ Claude can do these five things:
 | Change | What to know |
 | --- | --- |
 | Add negative keywords | To a campaign, an ad group, or a shared negative keyword list. Ones that are already there get skipped. |
+| Add keywords | To one ad group in a Search campaign, on or paused (you choose), with an optional max CPC. Ones already there get skipped. |
+| Add callouts | To a campaign, an ad group, or the whole account, up to 25 characters each. Ones already there get skipped. |
 | Create a new responsive search ad | It always starts **paused**, so nothing goes live until you turn it on. Your old ads aren't touched. |
 | Pause or turn on | Campaigns, ad groups, ads, or keywords. |
 | Change bid adjustments | Location, device, and ad schedule, on targets the campaign already has. It never adds or removes targeting. |

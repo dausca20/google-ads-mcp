@@ -57,7 +57,11 @@ class FakeGoogle:
                     return SimpleNamespace(
                         results=[
                             SimpleNamespace(resource_name=f"result/{i}")
-                            for i, _ in enumerate(request.operations)
+                            for i, _ in enumerate(
+                                request.mutate_operations
+                                if "mutate_operations" in type(request).meta.fields
+                                else request.operations
+                            )
                         ]
                     )
 
@@ -753,3 +757,95 @@ def test_tools_accept_json_arguments_with_number_ids(google):
     preview = asyncio.run(run())
     assert preview["changes"] == ['"free" (phrase match)']
     assert google.requests[0][2].validate_only is True
+
+
+# --- New keywords ---------------------------------------------------------------
+
+
+def test_new_keywords_preview(google):
+    google.results = [
+        *search_ad_group(),
+        (
+            "FROM ad_group_criterion",
+            [row(ad_group_criterion__keyword__text="maid service",
+                 ad_group_criterion__keyword__match_type=ENUMS.KeywordMatchTypeEnum.PHRASE)],
+        ),
+    ]
+    preview = changes.preview_new_keywords(
+        customer_id="1", ad_group_id=222, status="PAUSED",
+        keywords=[
+            changes.NewKeyword(text="house  cleaning", match_type="EXACT", max_cpc=2.5),
+            changes.NewKeyword(text="Maid Service", match_type="PHRASE"),
+            changes.NewKeyword(text="deep clean", match_type="BROAD"),
+        ],
+    )
+    assert preview["changes"] == [
+        '"house cleaning" (exact match), max CPC 2.5',
+        '"deep clean" (broad match), ad group\'s bid',
+    ]
+    assert preview["skipped"] == ['"Maid Service" (phrase match): already in this ad group']
+    assert preview["warnings"] == []
+    [(service, _, request)] = google.requests
+    assert service == "AdGroupCriterionService" and request.validate_only
+    first, second = [op.create for op in request.operations]
+    assert first.ad_group == "customers/1/adGroups/222"
+    assert first.status.name == "PAUSED" and not first.negative
+    assert (first.keyword.text, first.keyword.match_type.name, first.cpc_bid_micros) == ("house cleaning", "EXACT", 2_500_000)
+    assert "cpc_bid_micros" not in second
+
+
+def test_enabled_keywords_warn_about_spending(google):
+    google.results = search_ad_group()
+    preview = changes.preview_new_keywords(
+        customer_id="1", ad_group_id="222", status="ENABLED",
+        keywords=[changes.NewKeyword(text="cleaners", match_type="PHRASE")],
+    )
+    assert "spending" in preview["warnings"][0]
+    assert google.requests[0][2].operations[0].create.status.name == "ENABLED"
+
+
+# --- New callouts ---------------------------------------------------------------
+
+
+def test_new_callouts_on_a_campaign(google):
+    google.results = [
+        ("FROM campaign WHERE", [row(campaign__name="Cleaning - Search")]),
+        ("FROM campaign_asset", [row(asset__callout_asset__callout_text="Free Estimates")]),
+    ]
+    preview = changes.preview_new_callouts(
+        customer_id="1", campaign_id="111",
+        callouts=["Same Team Every Visit", "free estimates", "Insured & Bonded"],
+    )
+    assert preview["changes"] == ['"Same Team Every Visit"', '"Insured & Bonded"']
+    assert preview["skipped"] == ['"free estimates": already there']
+    [(service, method, request)] = google.requests
+    assert (service, method) == ("GoogleAdsService", "mutate")
+    assert request.validate_only is True
+    ops = list(request.mutate_operations)
+    assert ops[0].asset_operation.create.resource_name == "customers/1/assets/-1"
+    assert ops[0].asset_operation.create.callout_asset.callout_text == "Same Team Every Visit"
+    link = ops[1].campaign_asset_operation.create
+    assert (link.campaign, link.asset, link.field_type.name) == ("customers/1/campaigns/111", "customers/1/assets/-1", "CALLOUT")
+    assert ops[3].campaign_asset_operation.create.asset == "customers/1/assets/-2"
+
+
+def test_new_callouts_for_the_account_and_rules(google):
+    preview = changes.preview_new_callouts(customer_id="1", callouts=["24/7 Booking"])
+    assert "whole account" in preview["preview"]
+    ops = list(google.requests[0][2].mutate_operations)
+    assert ops[1].customer_asset_operation.create.field_type.name == "CALLOUT"
+    with pytest.raises(ToolError, match="26 characters"):
+        changes.preview_new_callouts(customer_id="1", callouts=["x" * 26])
+    with pytest.raises(ToolError, match="not both"):
+        changes.preview_new_callouts(customer_id="1", callouts=["a"], campaign_id="1", ad_group_id="2")
+
+
+def test_result_names_from_a_mixed_request():
+    response = CLIENT.get_type("MutateGoogleAdsResponse")
+    item = CLIENT.get_type("MutateOperationResponse")
+    item.asset_result.resource_name = "customers/1/assets/9"
+    response.mutate_operation_responses.append(item)
+    item = CLIENT.get_type("MutateOperationResponse")
+    item.campaign_asset_result.resource_name = "customers/1/campaignAssets/111~9~CALLOUT"
+    response.mutate_operation_responses.append(item)
+    assert changes._result_names(response) == ["customers/1/assets/9", "customers/1/campaignAssets/111~9~CALLOUT"]
