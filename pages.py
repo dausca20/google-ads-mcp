@@ -9,7 +9,7 @@ does if the code changes.
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
-LAST_UPDATED = "September 22, 2026"
+LAST_UPDATED = "October 20, 2026"
 
 _STYLE = """
 :root { --bg: #ffffff; --text: #1f2328; --muted: #59636e; --link: #0969da; }
@@ -45,7 +45,8 @@ def _page(title: str, body: str) -> HTMLResponse:
 HOME = """
 <h1>Claude Google Ads</h1>
 <p>This is a private connector. It lets its owner's Claude assistant read
-their own Google Ads accounts. It can also make the changes they ask for,
+their own Google Ads accounts and Google Tag Manager containers. It can also
+make the changes they ask for, including publishing Tag Manager containers,
 but only after they review a preview and approve it.</p>
 <p>It is not offered to the public. Only the Google accounts on its allowlist
 can sign in.</p>
@@ -58,22 +59,24 @@ PRIVACY = f"""
 
 <h2>What this app can access</h2>
 <p>When you sign in with Google, the app asks for permission to use the
-Google Ads API for your accounts. It also gets your basic Google profile
-(your email and name). Your email is used to check that you are on the
-app's allowlist.</p>
+Google Ads API and the Google Tag Manager API for your accounts. For Tag
+Manager that means viewing and editing containers, creating versions, and
+publishing them. It also gets your basic Google profile (your email and
+name). Your email is used to check that you are on the app's allowlist.</p>
 
 <h2>How the data is used</h2>
-<p>Only to do what you ask for in Claude: pulling reports and account
-settings, and making changes that you preview and approve. The data is not
-used for anything else, not used for advertising, and never sold.</p>
+<p>Only to do what you ask for in Claude: pulling reports, account
+settings, and Tag Manager setups, and making changes that you preview and
+approve. The data is not used for anything else, not used for advertising,
+and never sold.</p>
 
 <h2>Who it is shared with</h2>
-<p>The Google Ads data you ask for is sent to Claude, the AI assistant you
-connected. Anthropic runs Claude under the terms of your Claude account.
-It is not shared with anyone else.</p>
+<p>The Google Ads and Tag Manager data you ask for is sent to Claude, the AI
+assistant you connected. Anthropic runs Claude under the terms of your
+Claude account. It is not shared with anyone else.</p>
 
 <h2>What is stored</h2>
-<p>The app does not save your Google Ads data. It saves your sign-in tokens,
+<p>The app does not save your Google Ads or Tag Manager data. It saves your sign-in tokens,
 encrypted, in Google Cloud Firestore in the owner's Google Cloud project, so
 you stay connected. Google Cloud's logs may record which report queries were
 run, but not their results.</p>

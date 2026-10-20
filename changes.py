@@ -19,7 +19,7 @@ import os
 import re
 import secrets
 import time
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -382,18 +382,25 @@ def _check_with_google(kind: str, customer_id: str, params: dict) -> None:
     _send(customer_id, target, operations, validate_only=True)
 
 
-def _preview(kind, customer_id, params, title, details, skipped=(), warnings=()):
-    _check_with_google(kind, customer_id, params)
+def preview_result(kind, customer_id, params, title, details, skipped, warnings, google_check):
     return {
         "preview": title,
         "changes": list(details),
         "skipped": list(skipped),
         "warnings": list(warnings),
-        "google_check": "Passed. Google checked this change. Nothing has changed yet.",
+        "google_check": google_check,
         "change_code": make_change_code(kind, customer_id, params, title),
         "expires_in_minutes": CHANGE_CODE_LIFETIME_SECONDS // 60,
         "next_step": NEXT_STEP,
     }
+
+
+def _preview(kind, customer_id, params, title, details, skipped=(), warnings=()):
+    _check_with_google(kind, customer_id, params)
+    return preview_result(
+        kind, customer_id, params, title, details, skipped, warnings,
+        "Passed. Google checked this change. Nothing has changed yet.",
+    )
 
 
 # --- Small helpers ----------------------------------------------------------
@@ -1203,14 +1210,24 @@ def preview_new_callouts(
     return _preview("new_callouts", customer_id, params, title, details, skipped)
 
 
+# Tag Manager changes (tag_manager.py) register how they are applied here, so
+# apply_change stays the only tool that changes anything.
+OTHER_APPLIERS: dict[str, Callable[[dict], dict[str, Any]]] = {}
+
+
 @changes_mcp.tool(annotations=APPLY)
 def apply_change(change_code: str) -> dict[str, Any]:
-    """Makes a change in Google Ads that a preview tool prepared.
+    """Makes a change in Google Ads or Google Tag Manager that a preview tool prepared.
 
     Only call this after showing the user the preview and getting a clear yes.
     A change code works once and expires after an hour.
     """
     payload = read_change_code(change_code)
+    if payload["kind"] in OTHER_APPLIERS:
+        # Tag Manager changes take several requests and can stop partway, so
+        # the code is used up before the first one. A rerun can't double up.
+        _used_nonces.add(payload["nonce"])
+        return OTHER_APPLIERS[payload["kind"]](payload)
     client = utils.get_googleads_client()
     target, operations = _BUILDERS[payload["kind"]](client, payload["customer_id"], payload["params"])
     response = _send(payload["customer_id"], target, operations, validate_only=False)

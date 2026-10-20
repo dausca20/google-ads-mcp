@@ -1,14 +1,14 @@
-# Google Ads connector for Claude
+# Google Ads and Tag Manager connector for Claude
 
-This lets Claude look at your Google Ads accounts by itself, so your skills can pull the data for you.
+This lets Claude look at your Google Ads accounts and Google Tag Manager containers by itself, so your skills can pull the data for you.
 
-Claude can read everything. It can also make five kinds of changes, but only after showing you a preview first (see [Making changes](#making-changes)). It can't touch budgets.
+Claude can read everything. It can also make the changes listed under [Making changes](#making-changes), but only after showing you a preview first. It can't touch budgets.
 
 ```
-Claude  ──►  your server (on Google Cloud)  ──►  Google Ads
+Claude  ──►  your server (on Google Cloud)  ──►  Google Ads and Tag Manager
 ```
 
-The reading part is [Google's official Google Ads MCP server](https://github.com/googleads/google-ads-mcp). This repo adds three things: a lock so **only your email** can use it, the change tools, and a script that sets everything up for you.
+The Google Ads reading part is [Google's official Google Ads MCP server](https://github.com/googleads/google-ads-mcp). This repo adds four things: a lock so **only your email** can use it, the change tools, the [Tag Manager tools](#tag-manager), and a script that sets everything up for you.
 
 ## What you need
 
@@ -44,6 +44,8 @@ The reading part is [Google's official Google Ads MCP server](https://github.com
 
 You don't need a developer token. Google stopped requiring them on September 9, 2026 ([Google docs](https://developers.google.com/google-ads/api/docs/concepts/no-developer-token)).
 
+The setup script turns on the Tag Manager API for you.
+
 ### 4. Run the setup script
 
 1. Open [Cloud Shell](https://console.cloud.google.com/?cloudshell=true). It's a terminal in your browser, so there's nothing to install.
@@ -60,18 +62,18 @@ You don't need a developer token. Google stopped requiring them on September 9, 
 
 1. In Claude go to **Customize → Connectors**, click **+**, then **Add custom connector**.
 2. Name: `Google Ads`. URL: the one from step 4. Click **Add**.
-3. Click **Connect**, approve, pick your Google account, and click **Allow**.
+3. Click **Connect**, approve, pick your Google account, and click **Allow**. Google asks for Google Ads and Tag Manager. If it shows checkboxes, tick all of them.
 4. Still in **Customize → Connectors**, click the **Google Ads** connector. Set **apply_change** to **Needs approval** ([Claude docs](https://claude.com/docs/connectors/custom/remote-mcp)). That's the only tool that changes your accounts, and with this setting Claude asks you every time before using it.
 
 On a Team or Enterprise plan, an Owner adds it under **Organization settings → Connectors** first.
 
 ### 6. Try it
 
-Ask Claude: **"What Google Ads accounts can I access?"**
+Ask Claude: **"What Google Ads accounts can I access?"** and **"What Tag Manager containers can I access?"**
 
 ## Making changes
 
-Claude can do these five things:
+Claude can do these things:
 
 | Change | What to know |
 | --- | --- |
@@ -82,10 +84,12 @@ Claude can do these five things:
 | Pause or turn on | Campaigns, ad groups, ads, or keywords. |
 | Change bid adjustments | Location, device, and ad schedule, on targets the campaign already has. It never adds or removes targeting. |
 | Create conversion actions | Website conversions fired by a tag (like form submits), clicks on a phone number, and calls to a Google forwarding number on your site. Names already in the account are skipped. After they're made, Claude gives you each one's conversion ID and label to paste into Tag Manager. Google's API can't set a call action's phone number (that goes in the Tag Manager tag) or the engaged-view window. |
+| Add to a Tag Manager workspace | Tags, triggers, variables, and built-in variables. A new tag can fire on a trigger added in the same change. Names already in the workspace are skipped. Nothing goes live until you publish. |
+| Publish a Tag Manager workspace | Saves the workspace as a new version and publishes it to your website. The preview lists every change waiting in the workspace, including ones other people made. |
 
 Every change happens in two steps:
 
-1. **Preview.** Claude looks up what's there now and asks Google to test the change without making it ([Google docs](https://developers.google.com/google-ads/api/docs/concepts/api-structure)). You see a before-and-after list plus any warnings.
+1. **Preview.** Claude looks up what's there now and asks Google to test the change without making it ([Google docs](https://developers.google.com/google-ads/api/docs/concepts/api-structure)). You see a before-and-after list plus any warnings. Tag Manager has no test mode for adding items, so its error check runs in the publish preview, where Tag Manager builds a test version of the workspace first.
 2. **Apply.** Only after you say yes does Claude make the change. It can only apply the exact change you previewed. A preview expires after an hour and can be used once.
 
 The tool that makes changes is called `apply_change`. Keep it on **Needs approval** (setup step 5) so Claude asks you every time. When Claude asks, don't click **Always allow**, because that stops the asking. The preview tools never change anything.
@@ -94,6 +98,14 @@ Every change shows up in your Google Ads change history as made through the API 
 
 If a campaign uses Smart Bidding (like Maximize conversions or Target CPA), the preview warns you: Google ignores bid adjustments there, except a -100% device adjustment ([Google Ads help](https://support.google.com/google-ads/answer/2732132?hl=en)).
 
+## Tag Manager
+
+Claude can list your containers, read a workspace or the live version (tags, triggers, variables, and changes waiting to be published), add to a workspace, and publish. It works with the Tag Manager access your Google account already has, so publishing needs **Publish** permission on that container.
+
+A typical flow: Claude creates conversion actions in Google Ads, adds the matching conversion tag and trigger to the workspace with the conversion ID and label filled in, and then previews the publish. You can test the workspace with Tag Manager's own **Preview** button before you say yes.
+
+A publish keeps the earlier version under **Versions** in Tag Manager, and publishing that version again puts the site back the way it was.
+
 ## Good to know
 
 - **Auction insights can't be pulled this way.** Google doesn't make them public through the API ([Google Ads API forum](https://groups.google.com/g/adwords-api/c/30s21wGZkOU)), so the auction insights part of your competitor report still needs an export you download yourself.
@@ -101,6 +113,7 @@ If a campaign uses Smart Bidding (like Maximize conversions or Target CPA), the 
 - **Staying connected:** Google Cloud shuts the server off after it sits idle (up to 15 minutes) and starts it again on your next request ([Cloud Run docs](https://cloud.google.com/run/docs/about-instance-autoscaling)). The server handles each request on its own, so Claude stays connected through that. The first request after a quiet spell can take a few extra seconds while it starts.
 - **Daily limit:** Explorer access allows 2,880 operations a day ([Google docs](https://developers.google.com/google-ads/api/docs/api-policy/access-levels)).
 - **Update the server or change settings** (like who can use it, or your manager account): in Cloud Shell run `cd google-ads-mcp && git pull && bash setup.sh`. Press Enter to keep anything you don't want to change.
+- **Reconnect once after adding Tag Manager:** the update that adds Tag Manager needs one more permission from Google, so the connector stops working until you reconnect. In Claude go to **Customize → Connectors**, click **Google Ads**, click **Connect**, and allow everything Google asks for. If that shows an error, remove the connector and add it again (setup step 5).
 - **Manager account (MCC):** if you enter one in the script, Claude reaches all your accounts through it.
 
 ## Files
@@ -110,7 +123,8 @@ If a campaign uses Smart Bidding (like Maximize conversions or Target CPA), the 
 | `setup.sh` | Sets up Google Cloud and starts the server |
 | `server.py` | Starts Google's server and adds the email lock |
 | `changes.py` | The preview and apply tools for making changes |
+| `tag_manager.py` | The Tag Manager tools for reading, adding, and publishing |
 | `pages.py` | The home page and privacy policy Google needs to publish the app |
 | `Dockerfile` | Packs the server so Google Cloud can run it |
 | `constraints.txt` | Locks the exact versions that were tested |
-| `tests/` | Checks the email lock and the change tools |
+| `tests/` | Checks the email lock, the change tools, and the Tag Manager tools |
