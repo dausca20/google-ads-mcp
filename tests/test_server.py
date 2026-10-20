@@ -85,6 +85,12 @@ def test_allowed_user_sees_google_ads_tools(allowlisted_server):
         "customers_list_accessible_customers",
         "metadata_get_resource_metadata",
         "search_search",
+        "tag_manager_get_live_version",
+        "tag_manager_get_workspace",
+        "tag_manager_list_containers",
+        "tag_manager_list_workspaces",
+        "tag_manager_preview_new_items",
+        "tag_manager_preview_publish",
     ]
 
 

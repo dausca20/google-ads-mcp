@@ -146,7 +146,8 @@ gcloud services enable \
   artifactregistry.googleapis.com \
   firestore.googleapis.com \
   secretmanager.googleapis.com \
-  googleads.googleapis.com
+  googleads.googleapis.com \
+  tagmanager.googleapis.com
 
 # Settings from an earlier run, so pressing Enter keeps them.
 EXISTING_JSON="$(gcloud run services describe "$SERVICE" --region "$REGION" --format=json 2>/dev/null || true)"

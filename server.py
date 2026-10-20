@@ -11,6 +11,8 @@ reading. This file adds:
 4. A plain warning in the logs when a Google sign-in is rejected, saying why.
 5. Stateless connections, so Claude stays connected when Cloud Run restarts
    the server (see use_stateless_connections).
+6. Google Tag Manager tools (tag_manager.py), and Tag Manager permissions in
+   the Google sign-in (see ask_google_for_tag_manager).
 """
 
 import logging
@@ -27,9 +29,29 @@ from ads_mcp.coordinator import mcp
 from ads_mcp.server import run_server
 from changes import changes_mcp
 from pages import add_pages
+from tag_manager import TAG_MANAGER_SCOPES, tag_manager_mcp
+
+
+def ask_google_for_tag_manager() -> None:
+    """Adds Tag Manager's permissions to the ones the Google sign-in requires.
+
+    Google's server only asks for Google Ads. With these added, Claude's
+    sign-in asks Google for Tag Manager too, and a sign-in without them is
+    turned away and explained in the logs, the same as one without Google Ads.
+    """
+    auth = mcp.auth
+    if auth is None:
+        return
+    scopes = list(dict.fromkeys([*auth.required_scopes, *TAG_MANAGER_SCOPES]))
+    auth.required_scopes = scopes
+    auth._token_validator.required_scopes = scopes
+    auth.update_default_scopes(scopes)
+
 
 mcp.mount(changes_mcp, namespace="changes")
+mcp.mount(tag_manager_mcp, namespace="tag_manager")
 add_pages(mcp)
+ask_google_for_tag_manager()
 
 
 def parse_allowed_emails(raw: str | None) -> frozenset[str]:
