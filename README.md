@@ -2,7 +2,7 @@
 
 This lets Claude look at your Google Ads accounts and Google Tag Manager containers by itself, so your skills can pull the data for you.
 
-Claude can read everything. It can also make the changes listed under [Making changes](#making-changes), but only after showing you a preview first. It can't touch budgets.
+Claude can read everything. It can also make the changes listed under [Making changes](#making-changes), but only after showing you a preview first. It can't touch budgets, and the only thing it can remove is a negative keyword.
 
 ```
 Claude  ──►  your server (on Google Cloud)  ──►  Google Ads and Tag Manager
@@ -78,6 +78,8 @@ Claude can do these things:
 | Change | What to know |
 | --- | --- |
 | Add negative keywords | To a campaign, an ad group, or a shared negative keyword list. Ones that are already there get skipped. |
+| Remove negative keywords | From a campaign, an ad group, or a shared negative keyword list, in one match type or all of them. This is the only thing Claude can remove. |
+| Rename | Campaigns or ad groups. Only the name changes. |
 | Add keywords | To one ad group in a Search campaign, on or paused (you choose), with an optional max CPC. Ones already there get skipped. |
 | Add callouts | To a campaign, an ad group, or the whole account, up to 25 characters each. Ones already there get skipped. |
 | Create a new responsive search ad | It always starts **paused**, so nothing goes live until you turn it on. Your old ads aren't touched. |
@@ -111,6 +113,8 @@ A publish keeps the earlier version under **Versions** in Tag Manager, and publi
 - **Auction insights can't be pulled this way.** Google doesn't make them public through the API ([Google Ads API forum](https://groups.google.com/g/adwords-api/c/30s21wGZkOU)), so the auction insights part of your competitor report still needs an export you download yourself.
 - **Cost:** a few uses a month should fit inside Google Cloud's free monthly allowances once your free trial ends and you upgrade to a paid account ([Cloud Run pricing](https://cloud.google.com/run/pricing)). The setup script keeps only the 2 newest copies of the server and the newest Client secret, so storage stays inside the free amounts too.
 - **Staying connected:** Google Cloud shuts the server off after it sits idle (up to 15 minutes) and starts it again on your next request ([Cloud Run docs](https://cloud.google.com/run/docs/about-instance-autoscaling)). The server handles each request on its own, so Claude stays connected through that. The first request after a quiet spell can take a few extra seconds while it starts.
+- **No daily reconnect:** Google's sign-in lasts one hour. Claude's sign-in to your server now lasts a year, and the server renews the Google sign-in by itself, so Claude never has to. Claude often skips renewing sign-ins on its own, which is what made the connector expire every day ([Claude Code issue](https://github.com/anthropics/claude-code/issues/65036)). Removing the app at [myaccount.google.com/connections](https://myaccount.google.com/connections) still cuts Claude off. If Google ever refuses to renew, the server logs say why. While the sign-in app is in **Testing**, Google still ends sign-ins after 7 days (setup step 2).
+- **Reconnect once after this update:** sign-ins made before it still expire after an hour. In Claude go to **Customize → Connectors**, click **Google Ads**, and click **Connect**.
 - **Daily limit:** Explorer access allows 2,880 operations a day ([Google docs](https://developers.google.com/google-ads/api/docs/api-policy/access-levels)).
 - **Update the server or change settings** (like who can use it, or your manager account): in Cloud Shell run `cd google-ads-mcp && git pull && bash setup.sh`. Press Enter to keep anything you don't want to change.
 - **Reconnect once after adding Tag Manager:** the update that adds Tag Manager needs one more permission from Google, so the connector stops working until you reconnect. In Claude go to **Customize → Connectors**, click **Google Ads**, click **Connect**, and allow everything Google asks for. If that shows an error, remove the connector and add it again (setup step 5).

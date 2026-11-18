@@ -3,7 +3,8 @@
 Run by test_sign_in.py in its own process, because the server reads its
 sign-in settings when it is first imported. Prints one JSON line with the
 status of each step. Pass the scopes the fake Google should grant as
-arguments, or none to grant everything that was asked for.
+arguments, or none to grant everything that was asked for. Set
+FAKE_GOOGLE_REFUSES_RENEWAL=1 to have Google refuse to renew sign-ins.
 """
 
 import base64
@@ -13,8 +14,14 @@ import logging
 import os
 import re
 import sys
+import time
 import urllib.parse
 from pathlib import Path
+
+# A clock the flow can move forward, to replay Claude coming back a day later.
+real_time = time.time
+clock = {"offset": 0.0}
+time.time = lambda: real_time() + clock["offset"]
 
 os.environ.update(
     GOOGLE_ADS_MCP_OAUTH_CLIENT_ID="123-test.apps.googleusercontent.com",
@@ -44,17 +51,41 @@ CLAUDE = {
 }
 
 
+# Like Google, every sign-in it hands out works for one hour.
+issued = {}
+renewals = {"count": 0}
+
+
+def new_google_token() -> str:
+    token = f"ya29.test-{len(issued)}"
+    issued[token] = time.time() + 3599
+    return token
+
+
 def fake_google(request: httpx2.Request) -> httpx2.Response:
     url = str(request.url)
     scope = " ".join(GRANTED) if GRANTED else asked["scope"]
     if url.startswith("https://oauth2.googleapis.com/tokeninfo"):
+        seconds_left = int(issued.get(request.url.params.get("access_token"), 0) - time.time())
+        if seconds_left <= 0:
+            return httpx2.Response(400, json={"error": "invalid_token"})
         return httpx2.Response(200, json={
             "aud": CLIENT_ID, "azp": CLIENT_ID, "sub": "42", "scope": scope,
-            "expires_in": "3599", "email": "owner@example.com", "email_verified": "true",
+            "expires_in": str(seconds_left), "email": "owner@example.com", "email_verified": "true",
         })
     if url.startswith("https://oauth2.googleapis.com/token"):
+        form = urllib.parse.parse_qs(request.read().decode())
+        if form.get("grant_type") == ["refresh_token"]:
+            renewals["count"] += 1
+            if os.environ.get("FAKE_GOOGLE_REFUSES_RENEWAL"):
+                return httpx2.Response(400, json={
+                    "error": "invalid_grant", "error_description": "Token has been expired or revoked.",
+                })
+            return httpx2.Response(200, json={
+                "access_token": new_google_token(), "expires_in": 3599, "scope": scope, "token_type": "Bearer",
+            })
         return httpx2.Response(200, json={
-            "access_token": "ya29.test", "refresh_token": "1//test", "expires_in": 3599,
+            "access_token": new_google_token(), "refresh_token": "1//test", "expires_in": 3599,
             "scope": scope, "token_type": "Bearer",
         })
     if url.startswith("https://www.googleapis.com/oauth2/v2/userinfo"):
@@ -94,6 +125,7 @@ logging.getLogger("google_ads_mcp").addHandler(KeepWarnings(level=logging.WARNIN
 server.use_stateless_connections()
 server.add_email_allowlist()
 server.add_sign_in_explanations()
+server.keep_sign_ins_alive()
 
 verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
@@ -126,6 +158,7 @@ with TestClient(server.mcp.http_app(), base_url="http://localhost", follow_redir
     })
     result["token"] = response.status_code
     bearer = response.json().get("access_token")
+    result["claude_sign_in_seconds"] = response.json().get("expires_in")
     response = client.post(
         "/mcp",
         headers={
@@ -150,6 +183,16 @@ with TestClient(server.mcp.http_app(), base_url="http://localhost") as client:
         "/mcp", headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
     )
     result["after_restart"] = response.status_code
+
+# Claude comes back the next day with the same sign-in. Google's one-hour
+# sign-in ran out long ago, so the server has to renew it by itself.
+clock["offset"] = 26 * 60 * 60
+with TestClient(server.mcp.http_app(), base_url="http://localhost") as client:
+    headers = {"authorization": f"Bearer {bearer}", "accept": "application/json, text/event-stream"}
+    tools_list = {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}
+    result["next_day"] = client.post("/mcp", headers=headers, json=tools_list).status_code
+    result["next_day_again"] = client.post("/mcp", headers=headers, json=tools_list).status_code
+result["google_renewals"] = renewals["count"]
 
 result["warnings"] = warnings
 print(json.dumps(result))

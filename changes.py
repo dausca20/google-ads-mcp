@@ -8,7 +8,8 @@ Every change takes two steps:
    preview, so what gets applied is exactly what was previewed.
 
 Change codes are signed, belong to the person who made the preview, expire
-after an hour, and work once. Budget changes are left out on purpose.
+after an hour, and work once. Budget changes are left out on purpose, and the
+only things that can be removed are negative keywords.
 """
 
 import base64
@@ -197,31 +198,42 @@ def _send(customer_id: str, target: str, operations: list, validate_only: bool):
 # Preview and apply both use the same builder, so they always match.
 
 
+# level: (operation type, mutate target) for negative keywords.
+_NEGATIVE_MUTATE = {
+    "campaign": ("CampaignCriterionOperation", "campaign_criteria"),
+    "ad_group": ("AdGroupCriterionOperation", "ad_group_criteria"),
+    "negative_list": ("SharedCriterionOperation", "shared_criteria"),
+}
+
+
 def _build_negative_keywords(client, customer_id: str, p: dict):
+    operation_type, target = _NEGATIVE_MUTATE[p["level"]]
     operations = []
     for keyword in p["keywords"]:
+        operation = client.get_type(operation_type)
+        criterion = operation.create
         if p["level"] == "campaign":
-            operation = client.get_type("CampaignCriterionOperation")
-            criterion = operation.create
             criterion.campaign = f"customers/{customer_id}/campaigns/{p['target_id']}"
             criterion.negative = True
         elif p["level"] == "ad_group":
-            operation = client.get_type("AdGroupCriterionOperation")
-            criterion = operation.create
             criterion.ad_group = f"customers/{customer_id}/adGroups/{p['target_id']}"
             criterion.negative = True
         else:
-            operation = client.get_type("SharedCriterionOperation")
-            criterion = operation.create
             criterion.shared_set = f"customers/{customer_id}/sharedSets/{p['target_id']}"
         criterion.keyword.text = keyword["text"]
         criterion.keyword.match_type = client.enums.KeywordMatchTypeEnum[keyword["match_type"]]
         operations.append(operation)
-    target = {
-        "campaign": "campaign_criteria",
-        "ad_group": "ad_group_criteria",
-        "negative_list": "shared_criteria",
-    }[p["level"]]
+    return target, operations
+
+
+def _build_remove_negative_keywords(client, customer_id: str, p: dict):
+    operation_type, target = _NEGATIVE_MUTATE[p["level"]]
+    path = _NEGATIVE_TABLES[p["level"]][2]
+    operations = []
+    for criterion_id in p["criterion_ids"]:
+        operation = client.get_type(operation_type)
+        operation.remove = f"customers/{customer_id}/{path}/{p['target_id']}~{criterion_id}"
+        operations.append(operation)
     return target, operations
 
 
@@ -264,6 +276,18 @@ def _build_status_change(client, customer_id: str, p: dict):
         operation.update.resource_name = f"customers/{customer_id}/{path}/{item_id}"
         operation.update.status = getattr(client.enums, status_enum)[p["status"]]
         client.copy_from(operation.update_mask, FieldMask(paths=["status"]))
+        operations.append(operation)
+    return target, operations
+
+
+def _build_rename(client, customer_id: str, p: dict):
+    operation_type, _, target, path = _STATUS_SETUP[p["level"]]
+    operations = []
+    for item in p["renames"]:
+        operation = client.get_type(operation_type)
+        operation.update.resource_name = f"customers/{customer_id}/{path}/{item['id']}"
+        operation.update.name = item["name"]
+        client.copy_from(operation.update_mask, FieldMask(paths=["name"]))
         operations.append(operation)
     return target, operations
 
@@ -356,8 +380,10 @@ def _build_new_callouts(client, customer_id: str, p: dict):
 
 _BUILDERS = {
     "negative_keywords": _build_negative_keywords,
+    "remove_negative_keywords": _build_remove_negative_keywords,
     "new_search_ad": _build_new_search_ad,
     "status_change": _build_status_change,
+    "rename": _build_rename,
     "bid_adjustments": _build_bid_adjustments,
     "new_conversion_actions": _build_new_conversion_actions,
     "new_keywords": _build_new_keywords,
@@ -453,6 +479,81 @@ class NegativeKeyword(BaseModel):
     )
 
 
+# Where negative keywords live: (criterion table, filter, resource path).
+_NEGATIVE_TABLES = {
+    "campaign": (
+        "campaign_criterion",
+        "campaign.id = {id} AND campaign_criterion.type = KEYWORD AND campaign_criterion.negative = TRUE",
+        "campaignCriteria",
+    ),
+    "ad_group": (
+        "ad_group_criterion",
+        "ad_group.id = {id} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = TRUE",
+        "adGroupCriteria",
+    ),
+    "negative_list": (
+        "shared_criterion",
+        "shared_set.id = {id} AND shared_criterion.type = KEYWORD",
+        "sharedCriteria",
+    ),
+}
+
+
+def _negative_target(campaign_id, ad_group_id, negative_list_id) -> tuple[str, str]:
+    targets = {
+        "campaign": campaign_id,
+        "ad_group": ad_group_id,
+        "negative_list": negative_list_id,
+    }
+    chosen = [(level, value) for level, value in targets.items() if value not in (None, "")]
+    if len(chosen) != 1:
+        raise ToolError("Give exactly one of campaign_id, ad_group_id, or negative_list_id.")
+    level, target_id = chosen[0]
+    return level, _id(target_id, f"{level}_id")
+
+
+def _negative_place(customer_id: str, level: str, target_id: str) -> tuple[str, list[dict]]:
+    """Describes a campaign, ad group, or negative list and the negatives already in it.
+
+    Each negative comes back as {"text", "match_type", "criterion_id"}.
+    """
+    if level == "campaign":
+        found = _rows(customer_id, f"SELECT campaign.name FROM campaign WHERE campaign.id = {target_id}")
+        if not found:
+            raise ToolError(f"No campaign with ID {target_id} in account {customer_id}.")
+        where = f"campaign \"{found[0].campaign.name}\" ({target_id})"
+    elif level == "ad_group":
+        found = _rows(
+            customer_id,
+            f"SELECT ad_group.name, campaign.name FROM ad_group WHERE ad_group.id = {target_id}",
+        )
+        if not found:
+            raise ToolError(f"No ad group with ID {target_id} in account {customer_id}.")
+        where = f"ad group \"{found[0].ad_group.name}\" ({target_id}) in campaign \"{found[0].campaign.name}\""
+    else:
+        found = _rows(
+            customer_id,
+            f"SELECT shared_set.name, shared_set.type FROM shared_set WHERE shared_set.id = {target_id}",
+        )
+        if not found or found[0].shared_set.type_.name != "NEGATIVE_KEYWORDS":
+            raise ToolError(f"No negative keyword list with ID {target_id} in account {customer_id}.")
+        where = f"negative keyword list \"{found[0].shared_set.name}\" ({target_id})"
+    table, condition, _ = _NEGATIVE_TABLES[level]
+    existing = []
+    for r in _rows(
+        customer_id,
+        f"SELECT {table}.criterion_id, {table}.keyword.text, {table}.keyword.match_type "
+        f"FROM {table} WHERE {condition.format(id=target_id)}",
+    ):
+        criterion = getattr(r, table)
+        existing.append({
+            "text": criterion.keyword.text,
+            "match_type": criterion.keyword.match_type.name,
+            "criterion_id": str(criterion.criterion_id),
+        })
+    return where, existing
+
+
 @changes_mcp.tool(annotations=PREVIEW)
 def preview_negative_keywords(
     customer_id: str | int,
@@ -469,63 +570,14 @@ def preview_negative_keywords(
     for apply_change.
     """
     customer_id = utils.clean_customer_id(customer_id)
-    targets = {
-        "campaign": campaign_id,
-        "ad_group": ad_group_id,
-        "negative_list": negative_list_id,
-    }
-    chosen = [(level, value) for level, value in targets.items() if value not in (None, "")]
-    if len(chosen) != 1:
-        raise ToolError("Give exactly one of campaign_id, ad_group_id, or negative_list_id.")
-    level, target_id = chosen[0]
-    target_id = _id(target_id, f"{level}_id")
+    level, target_id = _negative_target(campaign_id, ad_group_id, negative_list_id)
     if not keywords:
         raise ToolError("Give at least one keyword.")
     if len(keywords) > MAX_NEGATIVE_KEYWORDS:
         raise ToolError(f"Add at most {MAX_NEGATIVE_KEYWORDS} negative keywords at a time.")
 
-    if level == "campaign":
-        found = _rows(customer_id, f"SELECT campaign.name FROM campaign WHERE campaign.id = {target_id}")
-        if not found:
-            raise ToolError(f"No campaign with ID {target_id} in account {customer_id}.")
-        where = f"campaign \"{found[0].campaign.name}\" ({target_id})"
-        existing = _rows(
-            customer_id,
-            "SELECT campaign_criterion.keyword.text, campaign_criterion.keyword.match_type "
-            f"FROM campaign_criterion WHERE campaign.id = {target_id} "
-            "AND campaign_criterion.type = KEYWORD AND campaign_criterion.negative = TRUE",
-        )
-        existing_keys = {(r.campaign_criterion.keyword.text.lower(), r.campaign_criterion.keyword.match_type.name) for r in existing}
-    elif level == "ad_group":
-        found = _rows(
-            customer_id,
-            f"SELECT ad_group.name, campaign.name FROM ad_group WHERE ad_group.id = {target_id}",
-        )
-        if not found:
-            raise ToolError(f"No ad group with ID {target_id} in account {customer_id}.")
-        where = f"ad group \"{found[0].ad_group.name}\" ({target_id}) in campaign \"{found[0].campaign.name}\""
-        existing = _rows(
-            customer_id,
-            "SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type "
-            f"FROM ad_group_criterion WHERE ad_group.id = {target_id} "
-            "AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = TRUE",
-        )
-        existing_keys = {(r.ad_group_criterion.keyword.text.lower(), r.ad_group_criterion.keyword.match_type.name) for r in existing}
-    else:
-        found = _rows(
-            customer_id,
-            f"SELECT shared_set.name, shared_set.type FROM shared_set WHERE shared_set.id = {target_id}",
-        )
-        if not found or found[0].shared_set.type_.name != "NEGATIVE_KEYWORDS":
-            raise ToolError(f"No negative keyword list with ID {target_id} in account {customer_id}.")
-        where = f"negative keyword list \"{found[0].shared_set.name}\" ({target_id})"
-        existing = _rows(
-            customer_id,
-            "SELECT shared_criterion.keyword.text, shared_criterion.keyword.match_type "
-            f"FROM shared_criterion WHERE shared_set.id = {target_id} "
-            "AND shared_criterion.type = KEYWORD",
-        )
-        existing_keys = {(r.shared_criterion.keyword.text.lower(), r.shared_criterion.keyword.match_type.name) for r in existing}
+    where, existing = _negative_place(customer_id, level, target_id)
+    existing_keys = {(n["text"].lower(), n["match_type"]) for n in existing}
 
     to_add, skipped, seen = [], [], set()
     for keyword in keywords:
@@ -548,6 +600,66 @@ def preview_negative_keywords(
     title = f"Add {len(to_add)} negative keyword(s) to {where}"
     details = [f"\"{k['text']}\" ({k['match_type'].lower()} match)" for k in to_add]
     return _preview("negative_keywords", customer_id, params, title, details, skipped)
+
+
+class NegativeToRemove(BaseModel):
+    text: str = Field(description="The negative keyword text, for example: apartment")
+    match_type: Literal["EXACT", "PHRASE", "BROAD"] | None = Field(
+        default=None,
+        description="EXACT, PHRASE, or BROAD. Leave empty to remove this text in every match type.",
+    )
+
+
+@changes_mcp.tool(annotations=PREVIEW)
+def preview_remove_negative_keywords(
+    customer_id: str | int,
+    keywords: list[NegativeToRemove],
+    campaign_id: str | int | None = None,
+    ad_group_id: str | int | None = None,
+    negative_list_id: str | int | None = None,
+) -> dict[str, Any]:
+    """Previews removing negative keywords, so searches they were blocking can show ads again. Nothing changes yet.
+
+    Give exactly one place to remove them from: campaign_id, ad_group_id, or
+    negative_list_id (a shared negative keyword list, shared_set.id).
+    Matching ignores capital letters. Keywords that aren't negatives there
+    are skipped. Returns a change_code for apply_change.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    level, target_id = _negative_target(campaign_id, ad_group_id, negative_list_id)
+    if not keywords:
+        raise ToolError("Give at least one keyword.")
+    if len(keywords) > MAX_NEGATIVE_KEYWORDS:
+        raise ToolError(f"Remove at most {MAX_NEGATIVE_KEYWORDS} negative keywords at a time.")
+
+    where, existing = _negative_place(customer_id, level, target_id)
+    to_remove, details, skipped = [], [], []
+    for keyword in keywords:
+        text = " ".join(keyword.text.split())
+        if not text:
+            raise ToolError("A keyword was empty.")
+        match_type = keyword.match_type
+        label = f"\"{text}\" ({match_type.lower() + ' match' if match_type else 'any match type'})"
+        matches = [
+            n for n in existing
+            if " ".join(n["text"].split()).lower() == text.lower()
+            and match_type in (None, n["match_type"])
+        ]
+        new = [n for n in matches if n["criterion_id"] not in to_remove]
+        if not matches:
+            skipped.append(f"{label}: not a negative there")
+        elif not new:
+            skipped.append(f"{label}: listed twice")
+        for n in new:
+            to_remove.append(n["criterion_id"])
+            details.append(f"\"{n['text']}\" ({n['match_type'].lower()} match)")
+    if not to_remove:
+        raise ToolError(f"Nothing to remove. None of these are negatives in {where}.")
+
+    params = {"level": level, "target_id": target_id, "criterion_ids": to_remove}
+    title = f"Remove {len(to_remove)} negative keyword(s) from {where}"
+    warnings = ["Searches these negatives were blocking can start showing ads right after this is applied."]
+    return _preview("remove_negative_keywords", customer_id, params, title, details, skipped, warnings)
 
 
 class AdText(BaseModel):
@@ -726,6 +838,85 @@ def preview_status_change(
     title = f"{verb} {len(to_change)} {level.replace('_', ' ')}(s)"
     params = {"level": level, "status": status, "ids": to_change}
     return _preview("status_change", customer_id, params, title, details, skipped, warnings)
+
+
+class NewName(BaseModel):
+    id: str | int = Field(description="The campaign ID or ad group ID")
+    name: str = Field(description="The new name, for example: RMS")
+
+
+_RENAME_LOOKUP = {
+    "campaign": (
+        "SELECT campaign.id, campaign.name, campaign.status FROM campaign WHERE campaign.id IN ({ids})",
+        lambda r: (str(r.campaign.id), "Campaign", r.campaign.name, "", r.campaign.status.name),
+    ),
+    "ad_group": (
+        "SELECT ad_group.id, ad_group.name, ad_group.status, campaign.name FROM ad_group WHERE ad_group.id IN ({ids})",
+        lambda r: (
+            str(r.ad_group.id), "Ad group", r.ad_group.name,
+            f" in campaign \"{r.campaign.name}\"", r.ad_group.status.name,
+        ),
+    ),
+}
+
+
+@changes_mcp.tool(annotations=PREVIEW)
+def preview_rename(
+    customer_id: str | int,
+    level: Literal["campaign", "ad_group"],
+    renames: list[NewName],
+) -> dict[str, Any]:
+    """Previews renaming campaigns or ad groups. Nothing changes yet.
+
+    Only one level per preview. Only the name changes. Campaign names must be
+    unique in the account and ad group names unique in their campaign, and
+    Google's check catches a name that is already taken. Returns a
+    change_code for apply_change.
+    """
+    customer_id = utils.clean_customer_id(customer_id)
+    if not renames:
+        raise ToolError("Give at least one rename.")
+    if len(renames) > MAX_STATUS_ITEMS:
+        raise ToolError(f"Rename at most {MAX_STATUS_ITEMS} items at a time.")
+    wanted, problems = {}, []
+    for rename in renames:
+        item_id = _id(rename.id, f"{level} ID")
+        name = rename.name.strip()
+        if item_id in wanted:
+            problems.append(f"{level.replace('_', ' ').capitalize()} {item_id} is listed twice.")
+        elif not name:
+            problems.append(f"The new name for {item_id} is empty.")
+        wanted[item_id] = name
+    if problems:
+        raise ToolError("Fix these first:\n- " + "\n- ".join(problems))
+
+    query, describe = _RENAME_LOOKUP[level]
+    found = {}
+    for row in _rows(customer_id, query.format(ids=",".join(wanted))):
+        item_id, kind, old_name, place, status = describe(row)
+        found[item_id] = (kind, old_name, place, status)
+    missing = [i for i in wanted if i not in found]
+    if missing:
+        raise ToolError(f"Couldn't find these {level} IDs in account {customer_id}: {', '.join(missing)}")
+    removed = [f"{found[i][0]} \"{found[i][1]}\"" for i in wanted if found[i][3] == "REMOVED"]
+    if removed:
+        raise ToolError("These were removed and can't be renamed: " + "; ".join(removed))
+
+    to_rename, details, skipped = [], [], []
+    for item_id, name in wanted.items():
+        kind, old_name, place, _ = found[item_id]
+        label = f"{kind} \"{old_name}\" ({item_id}){place}"
+        if old_name == name:
+            skipped.append(f"{label}: already has this name")
+        else:
+            to_rename.append({"id": item_id, "name": name})
+            details.append(f"{label} -> \"{name}\"")
+    if not to_rename:
+        raise ToolError("Nothing to rename. Everything already has the new name.")
+
+    title = f"Rename {len(to_rename)} {level.replace('_', ' ')}(s)"
+    params = {"level": level, "renames": to_rename}
+    return _preview("rename", customer_id, params, title, details, skipped)
 
 
 class BidAdjustment(BaseModel):

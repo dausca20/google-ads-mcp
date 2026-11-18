@@ -13,6 +13,9 @@ reading. This file adds:
    the server (see use_stateless_connections).
 6. Google Tag Manager tools (tag_manager.py), and Tag Manager permissions in
    the Google sign-in (see ask_google_for_tag_manager).
+7. Long-lasting sign-ins for Claude, with the server renewing Google's
+   hourly sign-in by itself, so the connector doesn't expire every day
+   (see keep_sign_ins_alive).
 """
 
 import logging
@@ -87,9 +90,11 @@ async def explain_rejected_sign_in(token: str, verifier) -> None:
     except httpx2.HTTPError:
         return
     if response.status_code != 200:
-        logger.warning(
+        # Usually Google's hourly sign-in ran out and the server renews it next.
+        # If renewing fails, keep_sign_ins_alive logs a warning that says why.
+        logger.info(
             "Google did not accept the saved sign-in (HTTP %d). This is normal right "
-            "before it refreshes. If Claude keeps failing, reconnect it.",
+            "before the server renews it.",
             response.status_code,
         )
         return
@@ -123,6 +128,51 @@ def add_sign_in_explanations() -> None:
         return result
 
     verifier.verify_token = verify_token
+
+
+# How long Claude's sign-in to this server lasts. The server already lets
+# Claude's renewal key last this long, so it gives no more access than before.
+CLAUDE_SIGN_IN_SECONDS = 365 * 24 * 60 * 60
+# Google's sign-in lasts an hour. Renew it this long before it runs out.
+RENEW_GOOGLE_EARLY_SECONDS = 5 * 60
+
+
+def keep_sign_ins_alive() -> None:
+    """Stops the connector from expiring in Claude every day.
+
+    Google's sign-in lasts one hour, and Claude's sign-in to this server used
+    to last that same hour. After that Claude has to renew it, and Claude
+    often doesn't, so the connector shows as expired until you reconnect
+    (https://github.com/anthropics/claude-code/issues/65036).
+
+    Now Claude's sign-in lasts a year and the server renews the Google
+    sign-in behind it by itself, a few minutes before each hour runs out.
+    Every request still checks the Google sign-in, so removing the app at
+    https://myaccount.google.com/connections still cuts Claude off.
+    """
+    auth = mcp.auth
+    if auth is None:
+        return
+    auth._fastmcp_access_token_expiry_seconds = CLAUDE_SIGN_IN_SECONDS
+    auth._token_expiry_threshold_seconds = RENEW_GOOGLE_EARLY_SECONDS
+    renew = auth._try_transparent_refresh
+
+    async def renew_and_explain(token_set):
+        try:
+            return await renew(token_set)
+        except Exception as error:
+            # The error says why (like "invalid_grant: Token has been expired
+            # or revoked.") and never contains the token itself.
+            logger.warning(
+                "Google wouldn't renew the saved sign-in (%s: %s), so Claude needs to "
+                "reconnect. If the Google sign-in app is still in Testing, Google ends "
+                "sign-ins after 7 days. Publishing it stops that (see the README).",
+                type(error).__name__,
+                str(error)[:200],
+            )
+            raise
+
+    auth._try_transparent_refresh = renew_and_explain
 
 
 def oauth_is_enabled() -> bool:
@@ -164,6 +214,7 @@ def main() -> None:
     if oauth_is_enabled():
         add_email_allowlist()
         add_sign_in_explanations()
+        keep_sign_ins_alive()
     run_server()
 
 

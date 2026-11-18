@@ -202,6 +202,190 @@ def test_negative_keywords_unknown_campaign(google):
         )
 
 
+# --- Removing negative keywords -------------------------------------------------
+
+
+def ad_group_with_negatives(*existing):
+    return [
+        ("FROM ad_group WHERE", [row(ad_group__name="House Cleaning", campaign__name="Search")]),
+        (
+            "FROM ad_group_criterion",
+            [
+                row(
+                    ad_group_criterion__criterion_id=criterion_id,
+                    ad_group_criterion__keyword__text=text,
+                    ad_group_criterion__keyword__match_type=ENUMS.KeywordMatchTypeEnum[match],
+                )
+                for criterion_id, text, match in existing
+            ],
+        ),
+    ]
+
+
+def test_remove_negative_keywords_preview_and_apply(google):
+    google.results = ad_group_with_negatives(
+        (41, "apartment", "BROAD"), (42, "moving", "BROAD"), (43, "Apartment", "EXACT"), (44, "move", "PHRASE")
+    )
+    preview = changes.preview_remove_negative_keywords(
+        customer_id="1",
+        keywords=[
+            changes.NegativeToRemove(text=" APARTMENT ", match_type="BROAD"),
+            changes.NegativeToRemove(text="apartment", match_type="BROAD"),
+            changes.NegativeToRemove(text="pets"),
+        ],
+        ad_group_id="222",
+    )
+    assert preview["preview"] == (
+        'Remove 1 negative keyword(s) from ad group "House Cleaning" (222) in campaign "Search"'
+    )
+    assert preview["changes"] == ['"apartment" (broad match)']
+    assert preview["skipped"] == [
+        '"apartment" (broad match): listed twice',
+        '"pets" (any match type): not a negative there',
+    ]
+    assert "start showing ads" in preview["warnings"][0]
+    [(service, method, check)] = google.requests
+    assert (service, method) == ("AdGroupCriterionService", "mutate_ad_group_criteria")
+    assert check.validate_only is True
+    assert [op.remove for op in check.operations] == ["customers/1/adGroupCriteria/222~41"]
+
+    result = changes.apply_change(preview["change_code"])
+    real = google.requests[1][2]
+    assert real.validate_only is False
+    assert list(real.operations) == list(check.operations)
+    assert result["done"] == preview["preview"]
+
+
+def test_remove_negative_keywords_any_match_type(google):
+    google.results = ad_group_with_negatives((41, "apartment", "BROAD"), (43, "apartment", "EXACT"), (42, "moving", "BROAD"))
+    preview = changes.preview_remove_negative_keywords(
+        customer_id="1", keywords=[changes.NegativeToRemove(text="apartment")], ad_group_id="222"
+    )
+    assert preview["changes"] == ['"apartment" (broad match)', '"apartment" (exact match)']
+    [(_, _, request)] = google.requests
+    assert [op.remove for op in request.operations] == [
+        "customers/1/adGroupCriteria/222~41",
+        "customers/1/adGroupCriteria/222~43",
+    ]
+
+
+@pytest.mark.parametrize(
+    "target, needle, found, service, resource",
+    [
+        ({"campaign_id": "111"}, "FROM campaign_criterion",
+         row(campaign_criterion__criterion_id=7, campaign_criterion__keyword__text="jobs",
+             campaign_criterion__keyword__match_type=ENUMS.KeywordMatchTypeEnum.PHRASE),
+         "CampaignCriterionService", "customers/1/campaignCriteria/111~7"),
+        ({"negative_list_id": "333"}, "FROM shared_criterion",
+         row(shared_criterion__criterion_id=8, shared_criterion__keyword__text="jobs",
+             shared_criterion__keyword__match_type=ENUMS.KeywordMatchTypeEnum.PHRASE),
+         "SharedCriterionService", "customers/1/sharedCriteria/333~8"),
+    ],
+)
+def test_remove_negative_keywords_other_levels(google, target, needle, found, service, resource):
+    google.results = [
+        ("FROM campaign WHERE", [row(campaign__name="Cleaning - Search")]),
+        (
+            "FROM shared_set WHERE",
+            [row(shared_set__name="Global negatives", shared_set__type_=ENUMS.SharedSetTypeEnum.NEGATIVE_KEYWORDS)],
+        ),
+        (needle, [found]),
+    ]
+    changes.preview_remove_negative_keywords(
+        customer_id="1", keywords=[changes.NegativeToRemove(text="jobs", match_type="PHRASE")], **target
+    )
+    [(name, _, request)] = google.requests
+    assert name == service
+    assert request.operations[0].remove == resource
+
+
+def test_remove_negative_keywords_nothing_to_remove(google):
+    google.results = ad_group_with_negatives((42, "moving", "BROAD"))
+    with pytest.raises(ToolError, match="Nothing to remove"):
+        changes.preview_remove_negative_keywords(
+            customer_id="1",
+            keywords=[changes.NegativeToRemove(text="moving", match_type="EXACT")],
+            ad_group_id="222",
+        )
+    with pytest.raises(ToolError, match="exactly one"):
+        changes.preview_remove_negative_keywords(
+            customer_id="1", keywords=[changes.NegativeToRemove(text="moving")]
+        )
+    assert google.requests == []
+
+
+# --- Renaming -------------------------------------------------------------------
+
+
+def test_rename_ad_group(google):
+    google.results = [
+        (
+            "FROM ad_group",
+            [
+                row(ad_group__id=6, ad_group__name="House Cleaning", campaign__name="Search",
+                    ad_group__status=ENUMS.AdGroupStatusEnum.ENABLED),
+                row(ad_group__id=7, ad_group__name="RMS", campaign__name="Search",
+                    ad_group__status=ENUMS.AdGroupStatusEnum.ENABLED),
+            ],
+        )
+    ]
+    preview = changes.preview_rename(
+        customer_id="1",
+        level="ad_group",
+        renames=[changes.NewName(id="6", name="  RMS "), changes.NewName(id=7, name="RMS")],
+    )
+    assert preview["preview"] == "Rename 1 ad group(s)"
+    assert preview["changes"] == ['Ad group "House Cleaning" (6) in campaign "Search" -> "RMS"']
+    assert preview["skipped"] == ['Ad group "RMS" (7) in campaign "Search": already has this name']
+    [(service, method, check)] = google.requests
+    assert (service, method) == ("AdGroupService", "mutate_ad_groups")
+    assert check.validate_only is True
+    [operation] = check.operations
+    assert operation.update.resource_name == "customers/1/adGroups/6"
+    assert operation.update.name == "RMS"
+    assert list(operation.update_mask.paths) == ["name"]
+
+    changes.apply_change(preview["change_code"])
+    real = google.requests[1][2]
+    assert real.validate_only is False
+    assert list(real.operations) == list(check.operations)
+
+
+def test_rename_campaign(google):
+    google.results = [
+        ("FROM campaign", [row(campaign__id=5, campaign__name="Old", campaign__status=ENUMS.CampaignStatusEnum.PAUSED)])
+    ]
+    preview = changes.preview_rename(
+        customer_id="1", level="campaign", renames=[changes.NewName(id="5", name="New")]
+    )
+    assert preview["changes"] == ['Campaign "Old" (5) -> "New"']
+    [(service, _, request)] = google.requests
+    assert service == "CampaignService"
+    assert request.operations[0].update.resource_name == "customers/1/campaigns/5"
+    assert list(request.operations[0].update_mask.paths) == ["name"]
+
+
+def test_rename_problems_are_caught_before_google(google):
+    google.results = [
+        ("FROM campaign", [row(campaign__id=5, campaign__name="Old", campaign__status=ENUMS.CampaignStatusEnum.REMOVED)])
+    ]
+    with pytest.raises(ToolError, match="empty"):
+        changes.preview_rename(customer_id="1", level="campaign", renames=[changes.NewName(id="5", name=" ")])
+    with pytest.raises(ToolError, match="listed twice"):
+        changes.preview_rename(
+            customer_id="1", level="campaign",
+            renames=[changes.NewName(id="5", name="A"), changes.NewName(id="5", name="B")],
+        )
+    with pytest.raises(ToolError, match="Couldn't find.*: 6"):
+        changes.preview_rename(customer_id="1", level="campaign", renames=[changes.NewName(id="6", name="A")])
+    with pytest.raises(ToolError, match="removed"):
+        changes.preview_rename(customer_id="1", level="campaign", renames=[changes.NewName(id="5", name="A")])
+    with pytest.raises(ToolError, match="Nothing to rename"):
+        google.results[0][1][0].campaign.status = ENUMS.CampaignStatusEnum.ENABLED
+        changes.preview_rename(customer_id="1", level="campaign", renames=[changes.NewName(id="5", name="Old")])
+    assert google.requests == []
+
+
 # --- Change codes -------------------------------------------------------------
 
 
