@@ -93,7 +93,7 @@ fetch "https://www.seroundtable.com/category/google-adwords" \
 
 section "PPC Land, Google-related posts only https://ppc.land/"
 fetch "https://ppc.land/rss/" | rss_items | decode \
-  | grep -iE $'\t[^\t]*(google|pmax|performance max|youtube|demand gen|merchant center|ai max|ai mode|gemini|tag manager|gtm|analytics|smart bidding|search ads|shopping ads|local services)' \
+  | grep -iE $'\t[^\t]*(google|pmax|performance max|youtube|demand gen|ai max|ai mode|gemini|tag manager|gtm|analytics|smart bidding|search ads|local services)' \
   | keep_recent
 
 printf '\nCutoff used: %s (last %s days). Search Engine Land and Search Engine Journal block direct reads, so cover them with web search.\n' "$CUTOFF" "$DAYS"
